@@ -219,6 +219,64 @@ def _install_hint_linux(missing: list[str]) -> str:
     return "\n  ".join(hints) if hints else "nothing to install"
 
 
+# Binaries auto-installable on Linux without sudo. ffmpeg/ffprobe need a
+# system package manager (apt/dnf), which needs sudo — we never run that
+# automatically, so those stay print-only via _install_hint_linux.
+_PIP_INSTALLABLE_LINUX = {"yt-dlp"}
+
+
+def _install_yt_dlp_via_pip() -> tuple[bool, str]:
+    """Install yt-dlp without sudo: prefer pipx (isolated), fall back to
+    `pip install --user`, retrying with --break-system-packages if the
+    system pip refuses on a PEP 668 externally-managed environment."""
+    if _which("pipx"):
+        cmd = ["pipx", "install", "yt-dlp"]
+        print(f"[setup] running: {' '.join(cmd)}", file=sys.stderr)
+        if subprocess.run(cmd).returncode == 0:
+            return True, "installed yt-dlp via pipx"
+        print("[setup] pipx install failed — falling back to pip --user", file=sys.stderr)
+
+    base_cmd = [sys.executable, "-m", "pip", "install", "--user", "yt-dlp"]
+    print(f"[setup] running: {' '.join(base_cmd)}", file=sys.stderr)
+    result = subprocess.run(base_cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        return True, "installed yt-dlp via pip --user"
+
+    if "externally-managed-environment" in (result.stderr or ""):
+        retry_cmd = base_cmd + ["--break-system-packages"]
+        print(
+            "[setup] pip environment is externally managed — retrying with "
+            "--break-system-packages",
+            file=sys.stderr,
+        )
+        if subprocess.run(retry_cmd).returncode == 0:
+            return True, "installed yt-dlp via pip --user --break-system-packages"
+
+    return False, f"pip install failed with exit code {result.returncode}"
+
+
+def _install_linux(missing: list[str]) -> tuple[bool, str]:
+    """Auto-install what's safely user-space installable (yt-dlp via
+    pipx/pip, no sudo). Everything else (ffmpeg/ffprobe) needs a system
+    package manager and sudo, so it's never run automatically — the caller
+    still gets install instructions for those via _install_hint_linux."""
+    pip_targets = [b for b in missing if b in _PIP_INSTALLABLE_LINUX]
+    manual_targets = [b for b in missing if b not in _PIP_INSTALLABLE_LINUX]
+
+    msg = "nothing pip-installable to do"
+    if pip_targets:
+        ok, msg = _install_yt_dlp_via_pip()
+        if not ok:
+            return False, f"{msg}. Install manually:\n  " + _install_hint_linux(pip_targets)
+
+    if manual_targets:
+        return False, (
+            f"{msg}; the rest needs a system package manager (requires sudo, "
+            "not run automatically):\n  " + _install_hint_linux(manual_targets)
+        )
+    return True, msg
+
+
 def _install_hint_windows(missing: list[str]) -> str:
     pkgs = _brew_pkg(missing)
     hints = []
@@ -333,9 +391,15 @@ def cmd_install() -> int:
                 return 2
             installed_deps = True
         elif system == "Linux":
-            print("[setup] dependencies missing on Linux — please install:", file=sys.stderr)
-            print("  " + _install_hint_linux(missing), file=sys.stderr)
-            return 2
+            ok, msg = _install_linux(missing)
+            print(f"[setup] {msg}", file=sys.stderr)
+            if not ok:
+                return 2
+            still_missing = _check_binaries()
+            if still_missing:
+                print(f"[setup] still missing after install: {', '.join(still_missing)}", file=sys.stderr)
+                return 2
+            installed_deps = True
         elif system == "Windows":
             print("[setup] dependencies missing on Windows — please install:", file=sys.stderr)
             print("  " + _install_hint_windows(missing), file=sys.stderr)

@@ -155,7 +155,7 @@ For claude.ai, build the `.skill` bundle from source: `bash skills/watch/scripts
 On the first `/watch` call, the skill runs `scripts/setup.py --check`. If `ffmpeg` / `yt-dlp` aren't on your PATH, or no Whisper API key is set, it walks you through fixing it:
 
 - **macOS** — auto-runs `brew install ffmpeg yt-dlp`.
-- **Linux** — prints the exact `apt` / `dnf` / `pipx` commands.
+- **Linux** — auto-installs `yt-dlp` via `pipx` (or `pip install --user`, retrying with `--break-system-packages` if the distro's pip refuses otherwise) since that's a user-space install with no sudo; prints the exact `apt`/`dnf` command for `ffmpeg`, which does need sudo, so it's never run automatically.
 - **Windows** — prints the `winget` / `pip` commands.
 - **API key** — scaffolds `~/.config/watch/.env` (mode `0600`) with commented placeholders for `GROQ_API_KEY` (preferred) and `OPENAI_API_KEY`.
 
@@ -222,7 +222,7 @@ in `~/.config/watch/.env`, or pass `--proxy` for a single call. `/watch` doesn't
 
 **Your own network is blocking the request** (yt-dlp's error mentions "not in allowlist" / "blocked by policy" / a TLS `CERTIFICATE_VERIFY_FAILED`) — `/watch` now detects both and tells you which:
 - An **egress/allowlist denial** means your environment's own network policy needs the reported host added — for YouTube, both the page host and `*.googlevideo.com` (video segments are served from a different host than the page).
-- A **TLS certificate error** usually means a TLS-intercepting proxy whose CA is in the OS trust store but not in yt-dlp's bundled `certifi` CA file (`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` don't affect yt-dlp). Fix it with:
+- A **TLS certificate error** usually means a TLS-intercepting proxy whose CA is in the OS trust store but not in yt-dlp's bundled `certifi` CA file (`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` don't affect yt-dlp). `/watch` fixes this itself on the first `CERTIFICATE_VERIFY_FAILED` — it merges the OS trust store into `certifi`'s bundle (same as `--merge-ca` below, backing up the original first) and retries once, logging what it did to stderr either way. You only need to run these yourself if that auto-remediation couldn't apply or didn't fix it:
   ```bash
   python3 skills/watch/scripts/setup.py --merge-ca      # merges the OS trust store in; backs up the original first
   python3 skills/watch/scripts/setup.py --restore-ca    # undoes it

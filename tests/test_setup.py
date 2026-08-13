@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import setup as watch_setup
+
 SETUP = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts" / "setup.py"
 
 
@@ -132,3 +134,97 @@ def test_merge_ca_then_restore_ca_cli(tmp_path):
     )
     assert restored.returncode == 0, restored.stderr
     assert cacert.read_text(encoding="utf-8") == pristine
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_install_yt_dlp_via_pip_prefers_pipx(monkeypatch):
+    calls = []
+    monkeypatch.setattr(watch_setup, "_which", lambda name: "/usr/bin/pipx" if name == "pipx" else None)
+    monkeypatch.setattr(
+        watch_setup.subprocess, "run",
+        lambda cmd, *a, **k: calls.append(cmd) or _FakeCompletedProcess(0),
+    )
+    ok, msg = watch_setup._install_yt_dlp_via_pip()
+    assert ok is True
+    assert "pipx" in msg
+    assert calls[0][:2] == ["pipx", "install"]
+
+
+def test_install_yt_dlp_via_pip_falls_back_to_pip_user_when_no_pipx(monkeypatch):
+    calls = []
+    monkeypatch.setattr(watch_setup, "_which", lambda name: None)
+    monkeypatch.setattr(
+        watch_setup.subprocess, "run",
+        lambda cmd, *a, **k: calls.append(cmd) or _FakeCompletedProcess(0),
+    )
+    ok, msg = watch_setup._install_yt_dlp_via_pip()
+    assert ok is True
+    assert "pip --user" in msg
+    assert calls[0][1:] == ["-m", "pip", "install", "--user", "yt-dlp"]
+
+
+def test_install_yt_dlp_via_pip_retries_with_break_system_packages(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        if "--break-system-packages" in cmd:
+            return _FakeCompletedProcess(0)
+        return _FakeCompletedProcess(1, stderr="error: externally-managed-environment")
+
+    monkeypatch.setattr(watch_setup, "_which", lambda name: None)
+    monkeypatch.setattr(watch_setup.subprocess, "run", fake_run)
+    ok, msg = watch_setup._install_yt_dlp_via_pip()
+    assert ok is True
+    assert "break-system-packages" in msg
+    assert len(calls) == 2
+    assert "--break-system-packages" in calls[1]
+
+
+def test_install_yt_dlp_via_pip_fails_cleanly_when_pip_errors(monkeypatch):
+    monkeypatch.setattr(watch_setup, "_which", lambda name: None)
+    monkeypatch.setattr(
+        watch_setup.subprocess, "run",
+        lambda cmd, *a, **k: _FakeCompletedProcess(1, stderr="some unrelated pip error"),
+    )
+    ok, msg = watch_setup._install_yt_dlp_via_pip()
+    assert ok is False
+    assert "pip install failed" in msg
+
+
+def test_install_linux_installs_pip_targets_and_flags_manual_targets(monkeypatch):
+    monkeypatch.setattr(watch_setup, "_install_yt_dlp_via_pip", lambda: (True, "installed yt-dlp via pip --user"))
+    ok, msg = watch_setup._install_linux(["yt-dlp", "ffmpeg", "ffprobe"])
+    assert ok is False  # ffmpeg/ffprobe still need a manual sudo install
+    assert "installed yt-dlp via pip --user" in msg
+    assert "sudo" in msg
+
+
+def test_install_linux_all_pip_installable_succeeds(monkeypatch):
+    monkeypatch.setattr(watch_setup, "_install_yt_dlp_via_pip", lambda: (True, "installed yt-dlp via pip --user"))
+    ok, msg = watch_setup._install_linux(["yt-dlp"])
+    assert ok is True
+    assert msg == "installed yt-dlp via pip --user"
+
+
+def test_install_linux_reports_pip_install_failure(monkeypatch):
+    monkeypatch.setattr(
+        watch_setup, "_install_yt_dlp_via_pip",
+        lambda: (False, "pip install failed with exit code 1"),
+    )
+    ok, msg = watch_setup._install_linux(["yt-dlp"])
+    assert ok is False
+    assert "pip install failed" in msg
+
+
+def test_install_linux_only_manual_targets_never_calls_pip():
+    ok, msg = watch_setup._install_linux(["ffmpeg", "ffprobe"])
+    assert ok is False
+    assert "nothing pip-installable to do" in msg
+    assert "sudo" in msg
