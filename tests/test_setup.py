@@ -78,3 +78,57 @@ def test_key_present_is_ready(tmp_path):
     assert js["status"] == "ready"
     assert js["can_proceed"] is True
     assert js["whisper_backend"] == "groq"
+
+
+def test_json_reports_proxy_and_tls_fields():
+    proc = _run(["--json"])
+    assert proc.returncode == 0, proc.stderr
+    data = json.loads(proc.stdout)
+    assert "proxy_configured" in data
+    assert "tls_patched" in data
+
+
+def test_json_reports_proxy_configured_true(tmp_path):
+    js = json.loads(_run(["--json"], home=tmp_path, extra_env={"WATCH_PROXY": "socks5://127.0.0.1:1080"}).stdout)
+    assert js["proxy_configured"] is True
+
+
+def _fake_certifi_env(tmp_path: Path, cacert_text: str) -> tuple[dict, Path]:
+    """Build a PYTHONPATH-shadowed fake `certifi` package so --merge-ca /
+    --restore-ca can be exercised end-to-end without touching the real
+    installed certifi bundle."""
+    pkg_root = tmp_path / "fakepkg"
+    certifi_dir = pkg_root / "certifi"
+    certifi_dir.mkdir(parents=True)
+    cacert = certifi_dir / "cacert.pem"
+    cacert.write_text(cacert_text, encoding="utf-8")
+    (certifi_dir / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        "def where():\n"
+        "    return str(Path(__file__).resolve().parent / 'cacert.pem')\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(pkg_root) + os.pathsep + env.get("PYTHONPATH", "")
+    return env, cacert
+
+
+def test_merge_ca_then_restore_ca_cli(tmp_path):
+    pristine = "-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n"
+    env, cacert = _fake_certifi_env(tmp_path, pristine)
+
+    merged = subprocess.run(
+        [sys.executable, str(SETUP), "--merge-ca"],
+        capture_output=True, text=True, env=env,
+    )
+    assert merged.returncode == 0, merged.stderr
+    merged_content = cacert.read_text(encoding="utf-8")
+    assert "ORIGINAL" in merged_content
+    assert len(merged_content) > len(pristine)  # system bundle appended
+
+    restored = subprocess.run(
+        [sys.executable, str(SETUP), "--restore-ca"],
+        capture_output=True, text=True, env=env,
+    )
+    assert restored.returncode == 0, restored.stderr
+    assert cacert.read_text(encoding="utf-8") == pristine

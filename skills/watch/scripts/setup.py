@@ -5,6 +5,10 @@ Modes:
   setup.py --check      Silent preflight. Exit 0 if ready, 2/3/4 on failure.
   setup.py --json       Machine-readable status for Claude to parse.
   setup.py              Installer. Auto-installs deps, scaffolds .env, marks SETUP_COMPLETE.
+  setup.py --merge-ca   Merge the OS trust store into yt-dlp's certifi CA bundle
+                        (fixes CERTIFICATE_VERIFY_FAILED behind a TLS-intercepting
+                        proxy). Opt-in, reversible; backs up the original first.
+  setup.py --restore-ca Undo --merge-ca.
 
 Design:
 - Silent on success: --check exits 0 with no output when everything's ready so
@@ -30,6 +34,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from config import get_config  # noqa: E402
+import tls_fix  # noqa: E402
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
@@ -56,6 +61,16 @@ OPENAI_API_KEY=
 # Allowed values: transcript | efficient | balanced | token-burner
 # Keep the value on its own line with no trailing comment.
 # WATCH_DETAIL=balanced
+
+# Optional proxy for yt-dlp's requests (http://, https://, or socks5://
+# [user:pass@]host:port). Leave unset for direct connections.
+#
+# Some environments — sandboxed/cloud agent environments in particular —
+# get blocked straight by YouTube because it blocks whole ranges of
+# datacenter IPs, independent of any network policy you control. If that's
+# what you're hitting, point this at a proxy running somewhere YouTube
+# doesn't block (commonly your own workstation) and route through it:
+# WATCH_PROXY=socks5://127.0.0.1:1080
 """
 
 
@@ -242,6 +257,9 @@ def _status() -> dict:
     can_proceed = (not missing) and (has_key or setup_complete)
 
     cfg = get_config()
+    cacert = tls_fix.find_certifi_cacert()
+    tls_patched = tls_fix.merge_status(cacert) if cacert else False
+
     return {
         "status": status,
         "can_proceed": can_proceed,
@@ -252,6 +270,8 @@ def _status() -> dict:
         "has_api_key": has_key,
         "config_file": str(CONFIG_FILE),
         "watch_detail": cfg["detail"],
+        "proxy_configured": bool(cfg.get("proxy")),
+        "tls_patched": tls_patched,
         "platform": platform.system(),
     }
 
@@ -350,6 +370,38 @@ def cmd_install() -> int:
     return 3
 
 
+def cmd_merge_ca() -> int:
+    """Merge the OS trust store into yt-dlp's bundled certifi CA bundle.
+
+    Fixes CERTIFICATE_VERIFY_FAILED under a TLS-intercepting egress proxy
+    (yt-dlp ignores SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE and
+    always verifies against certifi's own bundle). Opt-in and reversible —
+    backs up the original bundle before touching it; see --restore-ca.
+    """
+    result = tls_fix.merge_system_ca(force="--force" in sys.argv)
+    if not result["ok"]:
+        print(f"[setup] --merge-ca failed: {result['reason']}", file=sys.stderr)
+        return 1
+    print(f"[setup] {result['reason']}: {result.get('cacert', '')}")
+    if "system_bundle" in result:
+        print(f"[setup] merged from: {result['system_bundle']}")
+    if "backup" in result:
+        installer = Path(__file__).resolve()
+        print(f"[setup] original backed up at: {result['backup']}")
+        print(f"[setup] undo with: python3 {installer} --restore-ca")
+    return 0
+
+
+def cmd_restore_ca() -> int:
+    """Restore certifi's original CA bundle from the --merge-ca backup."""
+    result = tls_fix.restore_certifi()
+    if not result["ok"]:
+        print(f"[setup] --restore-ca failed: {result['reason']}", file=sys.stderr)
+        return 1
+    print(f"[setup] restored original certifi bundle: {result['cacert']}")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) > 1:
         arg = sys.argv[1]
@@ -357,6 +409,10 @@ def main() -> int:
             return cmd_check()
         if arg == "--json":
             return cmd_json()
+        if arg == "--merge-ca":
+            return cmd_merge_ca()
+        if arg == "--restore-ca":
+            return cmd_restore_ca()
     return cmd_install()
 
 

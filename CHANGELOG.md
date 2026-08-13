@@ -2,6 +2,13 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.3.0] — 2026-08-13
+
+### Added
+- **`--proxy` / `WATCH_PROXY`** — route yt-dlp's requests through an HTTP/HTTPS/SOCKS proxy. Needed in environments where YouTube blocks the request outright (e.g. datacenter IP ranges) rather than your own network policy blocking it — point it at a proxy running on infrastructure you control, such as your own workstation. The report's **Proxy** line confirms when one was used.
+- **`setup.py --merge-ca` / `--restore-ca`** (new `scripts/tls_fix.py`) — merges the OS trust store into yt-dlp's bundled `certifi` CA file, fixing `CERTIFICATE_VERIFY_FAILED` behind a TLS-intercepting egress proxy (yt-dlp verifies against its own `certifi` bundle unconditionally; `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` have no effect on it). Opt-in and reversible — backs up the original bundle before writing, restored with `--restore-ca`. Never disables certificate verification.
+- **Network-failure classification in `download.py`** — a failed download is now checked against known TLS-cert-failure and network/egress-allowlist-denial phrasing and raises a specific, actionable message instead of yt-dlp's generic extraction error. `setup.py --json` also reports `proxy_configured` and `tls_patched`.
+
 ## [0.2.0] — 2026-06-29
 
 ### Added
