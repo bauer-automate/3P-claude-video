@@ -1,6 +1,6 @@
 ---
 name: watch
-version: "0.3.0"
+version: "0.3.1"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or Whisper API fallback), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
@@ -81,7 +81,7 @@ The installer is idempotent — safe to re-run:
 python3 "${SKILL_DIR}/scripts/setup.py"
 ```
 
-On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux/Windows, it prints the exact install commands for the user to run. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
+On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux, it auto-installs `yt-dlp` too — via `pipx` if present, else `pip install --user` (retrying with `--break-system-packages` on distros that refuse a bare `pip install` outside a virtualenv) — since that's a pure user-space install with no sudo needed; `ffmpeg`/`ffprobe` need a system package manager (`apt`/`dnf`), which needs sudo, so those are never run automatically — it prints the exact command instead. On Windows, it prints the exact install commands for everything. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
 
 **If an API key is still missing after install:** use `AskUserQuestion` to ask the user whether they have a Groq API key (preferred — cheaper, faster) or an OpenAI key. Then write it into `~/.config/watch/.env` — set the matching `GROQ_API_KEY=...` or `OPENAI_API_KEY=...` line. If they don't want to set up Whisper, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
@@ -246,11 +246,11 @@ Some environments — sandboxed/cloud agent environments in particular — get a
 
 ## Failure modes and handling
 
-- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs ffmpeg/yt-dlp via brew on macOS, scaffolds the `.env`). For API key, ask the user via `AskUserQuestion` and write it to `~/.config/watch/.env`.
+- **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs `ffmpeg`+`yt-dlp` via brew on macOS; on Linux auto-installs `yt-dlp` via `pipx`/`pip --user` and prints the `apt`/`dnf` command for `ffmpeg`, which needs sudo; scaffolds the `.env`). For API key, ask the user via `AskUserQuestion` and write it to `~/.config/watch/.env`.
 - **No transcript available** → captions missing AND (no Whisper key OR Whisper API failed). Script prints a hint pointing to setup. Proceed frames-only and tell the user.
 - **Long video warning printed** → acknowledge it in your answer. Offer to re-run focused on a specific section via `--start`/`--end` rather than a sparse full-video scan.
 - **Download fails** → the script now classifies two specific network causes and raises a distinct message instead of yt-dlp's generic extraction error; otherwise yt-dlp's raw error goes to stderr as before.
-  - **TLS certificate verification failed** (message mentions `CERTIFICATE_VERIFY_FAILED` / "self-signed certificate in certificate chain") → yt-dlp verifies against its own bundled `certifi` CA file, not the OS trust store — `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` have no effect on it. This is what a TLS-intercepting egress proxy looks like (common in sandboxed/enterprise networks) even when the host is otherwise reachable and `curl` to it succeeds. Run `python3 "${SKILL_DIR}/scripts/setup.py" --merge-ca` to merge the OS trust store into that bundle (backs up the original first; undo with `--restore-ca`), then re-run `/watch`.
+  - **TLS certificate verification failed** (message mentions `CERTIFICATE_VERIFY_FAILED` / "self-signed certificate in certificate chain") → yt-dlp verifies against its own bundled `certifi` CA file, not the OS trust store — `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` have no effect on it. This is what a TLS-intercepting egress proxy looks like (common in sandboxed/enterprise networks) even when the host is otherwise reachable and `curl` to it succeeds. **The script auto-remediates this itself**: on the first `CERTIFICATE_VERIFY_FAILED`, it runs the same merge as `setup.py --merge-ca` (backing up the original bundle first) and retries once before raising anything — a stderr line says so either way. You only see the raised error if that auto-merge couldn't apply (e.g. no OS trust store found in known locations) or didn't fix it; at that point set `SSL_CERT_FILE` to the right bundle and re-run, or run `python3 "${SKILL_DIR}/scripts/setup.py" --merge-ca` manually once it's in place (undo with `--restore-ca`).
   - **Network/egress policy block** (message says "network/egress policy block", or stderr otherwise mentions "not in allowlist" / "blocked by policy" / "forbidden by proxy") → this environment's own network layer is denying the request, not the video host. Tell the user their outbound allowlist needs the reported host — and for YouTube specifically, both the page host and `*.googlevideo.com` (video/audio segments are served from a different host than the page).
   - **Neither pattern matched** (plain 403 / "Sign in to confirm you're not a bot", or a login-required / region-locked video) → for the bot-check case, this is usually YouTube blocking the sandbox's IP range outright — see "Downloading through a proxy" above. For login-required/region-locked videos, tell the user plainly; do not keep retrying.
 - **Whisper request fails** → the error is printed to stderr (likely: invalid key or rate limit). Audio over the API's 25 MB upload cap is split into chunks and transcribed automatically, so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk fails. You can retry with `--whisper openai` if Groq failed (or vice versa).
@@ -273,7 +273,8 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Sends the extracted audio clip to OpenAI's audio transcription API (`api.openai.com/v1/audio/transcriptions`) when `OPENAI_API_KEY` is set and Groq is not, or when `--whisper openai` is forced
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
 - Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s), an optional `WATCH_PROXY`, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
-- `setup.py --merge-ca` (opt-in, only when explicitly run) copies certs from the OS trust store into yt-dlp's bundled `certifi` CA file, after backing up the original — reversible with `setup.py --restore-ca`
+- On Linux, `setup.py` installs `yt-dlp` via `pipx` or `pip install --user` (user-space, no sudo) when it's missing — `ffmpeg`/`ffprobe` still just print an `apt`/`dnf` command, since those need sudo
+- Copies certs from the OS trust store into yt-dlp's bundled `certifi` CA file, after backing up the original — automatically, once, the first time a download hits `CERTIFICATE_VERIFY_FAILED` (same effect as `setup.py --merge-ca`; always logged to stderr when it happens), and manually via `setup.py --merge-ca` / `setup.py --restore-ca`
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio goes out, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`
@@ -282,7 +283,7 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Does not log, cache, or write API keys to stdout, stderr, or output files
 - Does not persist anything outside the working directory and `~/.config/watch/.env` — clean up the working directory when you're done (Step 5)
 - Does not provide, run, or tunnel a proxy itself — `WATCH_PROXY`/`--proxy` must point at infrastructure the user already controls
-- Does not weaken TLS verification — `--merge-ca` adds trust anchors from the OS's own store, it never disables certificate checking (no `--no-check-certificates` passthrough)
+- Does not weaken TLS verification — the CA merge (automatic or manual) adds trust anchors from the OS's own store, it never disables certificate checking (no `--no-check-certificates` passthrough)
 
 **Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/setup.py` (preflight + installer), `scripts/tls_fix.py` (OS trust store ↔ certifi CA bundle merge/restore, invoked via `setup.py --merge-ca`/`--restore-ca`)
 

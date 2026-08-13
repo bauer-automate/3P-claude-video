@@ -2,6 +2,12 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.3.1] — 2026-08-13
+
+### Fixed
+- **Linux now auto-installs `yt-dlp`** in `setup.py`, instead of only printing the install command. Tries `pipx install yt-dlp` first, falling back to `pip install --user yt-dlp` (retrying with `--break-system-packages` if the distro's pip refuses on a PEP 668 externally-managed environment) — both are user-space installs, no sudo. `ffmpeg`/`ffprobe` still print an `apt`/`dnf` command rather than auto-installing, since those genuinely need sudo.
+- **TLS certificate failures now self-heal.** The first time a download hits `CERTIFICATE_VERIFY_FAILED`, `download.py` automatically runs the same OS-trust-store merge as `setup.py --merge-ca` and retries once before raising anything — previously this required a manual `--merge-ca` run and a second `/watch` call. The merge attempt (and its outcome) is always logged to stderr; the raised error message only appears if auto-remediation couldn't apply or didn't fix it.
+
 ## [0.3.0] — 2026-08-13
 
 ### Added

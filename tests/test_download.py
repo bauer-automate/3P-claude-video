@@ -21,6 +21,19 @@ import download  # noqa: E402
 URL = "https://www.youtube.com/watch?v=rlOpbu3Enkw"
 
 
+@pytest.fixture(autouse=True)
+def _stub_tls_fix_by_default(monkeypatch):
+    """Safety net for every test in this file: stub tls_fix.merge_system_ca
+    so a TLS-cert-failure test can never accidentally touch the real
+    installed certifi bundle. Tests that want to exercise the auto-merge
+    retry path override this explicitly with their own monkeypatch.setattr."""
+    monkeypatch.setattr(
+        download.tls_fix,
+        "merge_system_ca",
+        lambda: {"ok": False, "reason": "stubbed in tests — no real merge"},
+    )
+
+
 def _capture_argv(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Stub subprocess.run inside download.py and record every argv."""
     calls: list[list[str]] = []
@@ -116,6 +129,9 @@ def test_classify_unknown_failure_returns_none():
 
 
 def test_download_url_surfaces_tls_cert_failure(monkeypatch, tmp_path):
+    """Auto-merge is attempted (and, per the autouse stub, fails) before the
+    generic TLS message is raised — this is the "remediation didn't apply"
+    path, e.g. no OS trust store found in known locations."""
     monkeypatch.setattr(
         download.subprocess,
         "run",
@@ -124,8 +140,68 @@ def test_download_url_surfaces_tls_cert_failure(monkeypatch, tmp_path):
             "self-signed certificate in certificate chain"
         ),
     )
-    with pytest.raises(SystemExit, match="TLS certificate verification failed"):
+    with pytest.raises(SystemExit, match="TLS certificate verification still failed"):
         download.download_url(URL, tmp_path / "download")
+
+
+def test_download_url_auto_merges_ca_and_retries_on_tls_failure(monkeypatch, tmp_path):
+    """When the auto-merge succeeds, yt-dlp is retried once and the retry's
+    output — not the original TLS failure — is what gets classified."""
+    calls = {"n": 0}
+
+    def fake_run(cmd, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeCompletedProcess(
+                stderr="CERTIFICATE_VERIFY_FAILED self-signed certificate in certificate chain"
+            )
+        return _FakeCompletedProcess(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(download.subprocess, "run", fake_run)
+    monkeypatch.setattr(download.tls_fix, "merge_system_ca", lambda: {"ok": True, "reason": "merged"})
+
+    # No file is ever written to tmp_path/download, so _pick_video still finds
+    # nothing on the retry — but reaching the generic "no video file" message
+    # (not the TLS one) proves the retry's clean output was classified,
+    # confirming the retry actually happened.
+    with pytest.raises(SystemExit, match="did not produce a video file"):
+        download.download_url(URL, tmp_path / "download")
+    assert calls["n"] == 2
+
+
+def test_download_url_tls_failure_persists_even_when_merge_succeeds(monkeypatch, tmp_path):
+    """The merge can succeed while the real problem isn't a trust-store gap
+    at all — the retry's (still-failing) output must still be classified and
+    surfaced, not silently swallowed because the merge itself reported ok."""
+    monkeypatch.setattr(
+        download.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            stderr="CERTIFICATE_VERIFY_FAILED self-signed certificate in certificate chain"
+        ),
+    )
+    monkeypatch.setattr(download.tls_fix, "merge_system_ca", lambda: {"ok": True, "reason": "merged"})
+    with pytest.raises(SystemExit, match="TLS certificate verification still failed"):
+        download.download_url(URL, tmp_path / "download")
+
+
+def test_egress_denial_does_not_trigger_auto_merge(monkeypatch, tmp_path):
+    """The auto-merge retry is TLS-specific — an egress/allowlist denial must
+    never trigger it."""
+    merge_calls = []
+    monkeypatch.setattr(
+        download.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(stderr="Host not in allowlist: youtube.com."),
+    )
+    monkeypatch.setattr(
+        download.tls_fix,
+        "merge_system_ca",
+        lambda: merge_calls.append(1) or {"ok": True, "reason": "merged"},
+    )
+    with pytest.raises(SystemExit, match="network/egress policy block"):
+        download.download_url(URL, tmp_path / "download")
+    assert merge_calls == []
 
 
 def test_download_url_surfaces_egress_denial(monkeypatch, tmp_path):

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import tls_fix
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".wmv"}
 
@@ -51,15 +52,21 @@ def classify_yt_dlp_failure(output: str) -> str | None:
 
 def _failure_message(kind: str, url: str) -> str:
     if kind == "tls_cert":
+        # Reaching this point means _run_yt_dlp_with_tls_retry already tried the
+        # same fix (merge OS trust store into certifi, retry once) and it either
+        # couldn't apply or didn't resolve it — see the auto-remediation line above.
         setup_py = Path(__file__).resolve().parent / "setup.py"
         return (
-            "yt-dlp's TLS certificate verification failed. This is usually a "
-            "TLS-intercepting proxy (common in sandboxed/enterprise networks) whose CA "
-            "is in the OS trust store but not in yt-dlp's bundled certifi CA file — "
+            "yt-dlp's TLS certificate verification still failed after automatic "
+            "remediation (merging the OS trust store into yt-dlp's bundled certifi CA "
+            "file, same as `setup.py --merge-ca`, then retrying once) — see the "
+            "auto-remediation line above for what happened. This is usually a "
+            "TLS-intercepting proxy (common in sandboxed/enterprise networks); "
             "SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE have no effect on yt-dlp's "
-            f"networking backend. Run `python3 {setup_py} --merge-ca` to merge your OS "
-            "trust store into certifi's bundle (backs up the original first; undo with "
-            "`--restore-ca`), then re-run."
+            "networking backend either way. If no OS trust store was found, set "
+            "SSL_CERT_FILE to your proxy's CA bundle and re-run, or run "
+            f"`python3 {setup_py} --merge-ca` manually once that's in place (undo with "
+            "`--restore-ca`)."
         )
     if kind == "egress_denied":
         host = urlparse(url).netloc or url
@@ -86,6 +93,38 @@ def _run_yt_dlp(cmd: list[str]) -> tuple[subprocess.CompletedProcess, str]:
         if not output.endswith("\n"):
             sys.stderr.write("\n")
         sys.stderr.flush()
+    return result, output
+
+
+def _maybe_auto_merge_ca() -> bool:
+    """One-shot auto-remediation for a TLS-cert failure: merge the OS trust
+    store into yt-dlp's certifi bundle (same as `setup.py --merge-ca`).
+    Best-effort — returns False on any failure so the caller falls back to
+    surfacing the original error. Never silent: the merge attempt itself
+    (and its outcome) is always logged."""
+    result = tls_fix.merge_system_ca()
+    if result.get("ok"):
+        print(
+            f"[watch] TLS certificate verification failed — auto-merging the OS trust "
+            f"store into yt-dlp's certifi bundle ({result.get('reason')}) and retrying…",
+            file=sys.stderr,
+        )
+        return True
+    print(
+        f"[watch] TLS certificate verification failed and auto-remediation didn't apply "
+        f"({result.get('reason')}) — see the guidance below.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _run_yt_dlp_with_tls_retry(cmd: list[str]) -> tuple[subprocess.CompletedProcess, str]:
+    """Run yt-dlp; on a TLS-cert failure, auto-merge the OS trust store into
+    certifi once and retry before giving up. A single retry only — if the
+    auto-merge doesn't fix it, the original failure path takes over."""
+    result, output = _run_yt_dlp(cmd)
+    if classify_yt_dlp_failure(output) == "tls_cert" and _maybe_auto_merge_ca():
+        result, output = _run_yt_dlp(cmd)
     return result, output
 
 
@@ -157,7 +196,7 @@ def fetch_captions(url: str, out_dir: Path, proxy: str | None = None) -> dict:
     if proxy:
         cmd += ["--proxy", proxy]
     cmd += ["--", url]
-    _, output = _run_yt_dlp(cmd)
+    _, output = _run_yt_dlp_with_tls_retry(cmd)
     subtitle = _pick_subtitle(out_dir)
     info = _read_info(out_dir / "video.info.json", url)
     if subtitle is None and not info:
@@ -223,7 +262,7 @@ def download_url(
 
     # yt-dlp may exit non-zero if a subtitle variant fails (e.g. 429) even when
     # the video itself downloaded fine. Treat "video file present" as success.
-    result, output = _run_yt_dlp(cmd)
+    result, output = _run_yt_dlp_with_tls_retry(cmd)
     video = _pick_video(out_dir)
     if video is None:
         kind = classify_yt_dlp_failure(output)
