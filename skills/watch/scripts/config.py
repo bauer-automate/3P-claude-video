@@ -56,8 +56,11 @@ def get_config() -> dict[str, object]:
     if detail not in DETAILS:
         detail = DEFAULT_DETAIL
 
+    proxy = (os.environ.get("WATCH_PROXY") or file_values.get("WATCH_PROXY") or "").strip()
+
     return {
         "detail": detail,
+        "proxy": proxy or None,
         "config_file": str(CONFIG_FILE),
     }
 

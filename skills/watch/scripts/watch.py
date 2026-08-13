@@ -50,6 +50,13 @@ def main() -> int:
     ap.add_argument("--end", type=str, default=None, help="Range end (SS, MM:SS, or HH:MM:SS)")
     ap.add_argument("--out-dir", type=str, default=None, help="Working directory (default: tmp)")
     ap.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        help="HTTP/HTTPS/SOCKS proxy for yt-dlp, e.g. socks5://127.0.0.1:1080 "
+             "(default: WATCH_PROXY in ~/.config/watch/.env, or none).",
+    )
+    ap.add_argument(
         "--no-whisper",
         action="store_true",
         help="Disable Whisper fallback. Report frames-only if no captions available.",
@@ -70,6 +77,7 @@ def main() -> int:
 
     config = get_config()
     detail = args.detail or str(config["detail"])
+    proxy = args.proxy or config.get("proxy")
     configured_cap = frame_cap(detail)
     if args.max_frames is not None:
         max_frames = args.max_frames
@@ -96,7 +104,7 @@ def main() -> int:
 
     if url_source:
         print("[watch] checking metadata/captions via yt-dlp…", file=sys.stderr)
-        dl = fetch_captions(args.source, work / "download")
+        dl = fetch_captions(args.source, work / "download", proxy=proxy)
         if dl.get("subtitle_path"):
             try:
                 transcript_segments = parse_vtt(dl["subtitle_path"])
@@ -122,6 +130,7 @@ def main() -> int:
                 args.source,
                 work / "download",
                 audio_only=audio_only,
+                proxy=proxy,
             )
         else:
             print("[watch] using local file…", file=sys.stderr)
@@ -271,6 +280,8 @@ def main() -> int:
     print("# watch: video report")
     print()
     print(f"- **Source:** {args.source}")
+    if proxy and url_source:
+        print(f"- **Proxy:** {proxy}")
     if info.get("title"):
         print(f"- **Title:** {info['title']}")
     if info.get("uploader"):

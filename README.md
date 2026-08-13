@@ -199,6 +199,34 @@ Other knobs (passed to `scripts/watch.py`):
 - `--no-whisper` — disable transcription entirely; frames only.
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the one before them (held slides, static screen recordings, paused video), so the frame budget is spent on distinct content; this flag turns that off.
 - `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
+- `--proxy URL` — route yt-dlp through an HTTP/HTTPS/SOCKS proxy (e.g. `socks5://127.0.0.1:1080`). Default: `WATCH_PROXY` in `~/.config/watch/.env`. See [Running in a blocked network](#running-in-a-blocked-network).
+
+## Running in a blocked network
+
+Two different things can break a download, and they need different fixes:
+
+**YouTube is blocking the request itself** (bot-check page, flat 403, no allowlist wording) — common for sandboxed/cloud agent environments, since YouTube blocks whole ranges of datacenter IPs outright. Point `/watch` at a proxy running somewhere YouTube doesn't block — typically your own workstation:
+
+```bash
+# On the workstation: a local SOCKS5 listener via SSH (or microsocks/tinyproxy)
+ssh -N -D 1080 localhost
+```
+
+Make it reachable from wherever `/watch` runs (Tailscale, an SSH reverse tunnel, `ngrok`/`cloudflared`), then set:
+
+```
+WATCH_PROXY=socks5://127.0.0.1:1080
+```
+
+in `~/.config/watch/.env`, or pass `--proxy` for a single call. `/watch` doesn't ship or manage the proxy — point it at infrastructure you already control.
+
+**Your own network is blocking the request** (yt-dlp's error mentions "not in allowlist" / "blocked by policy" / a TLS `CERTIFICATE_VERIFY_FAILED`) — `/watch` now detects both and tells you which:
+- An **egress/allowlist denial** means your environment's own network policy needs the reported host added — for YouTube, both the page host and `*.googlevideo.com` (video segments are served from a different host than the page).
+- A **TLS certificate error** usually means a TLS-intercepting proxy whose CA is in the OS trust store but not in yt-dlp's bundled `certifi` CA file (`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` don't affect yt-dlp). Fix it with:
+  ```bash
+  python3 skills/watch/scripts/setup.py --merge-ca      # merges the OS trust store in; backs up the original first
+  python3 skills/watch/scripts/setup.py --restore-ca    # undoes it
+  ```
 
 ## Limits
 
@@ -218,7 +246,8 @@ Other knobs (passed to `scripts/watch.py`):
 │       ├── transcribe.py         # VTT parsing + dedupe + Whisper orchestration
 │       ├── whisper.py            # Groq / OpenAI clients (pure stdlib)
 │       ├── config.py             # shared config (~/.config/watch/.env)
-│       ├── setup.py              # preflight + installer
+│       ├── setup.py              # preflight + installer (+ --merge-ca/--restore-ca)
+│       ├── tls_fix.py            # OS trust store ↔ certifi CA bundle merge/restore
 │       └── build-skill.sh        # build dist/watch.skill for claude.ai upload (dev-only)
 ├── hooks/                        # SessionStart status hook (Claude Code only)
 ├── .claude-plugin/               # plugin.json + marketplace.json (Claude Code)
