@@ -88,11 +88,26 @@ def test_json_reports_proxy_and_tls_fields():
     data = json.loads(proc.stdout)
     assert "proxy_configured" in data
     assert "tls_patched" in data
+    assert "cookies_configured" in data
 
 
 def test_json_reports_proxy_configured_true(tmp_path):
     js = json.loads(_run(["--json"], home=tmp_path, extra_env={"WATCH_PROXY": "socks5://127.0.0.1:1080"}).stdout)
     assert js["proxy_configured"] is True
+
+
+def test_json_reports_cookies_configured_true(tmp_path):
+    js = json.loads(_run(["--json"], home=tmp_path, extra_env={"WATCH_COOKIES": "/home/user/cookies.txt"}).stdout)
+    assert js["cookies_configured"] is True
+
+
+def test_json_reports_cookies_configured_false_by_default(tmp_path):
+    js = json.loads(_run(["--json"], home=tmp_path).stdout)
+    assert js["cookies_configured"] is False
+
+
+def test_env_template_mentions_watch_cookies():
+    assert "WATCH_COOKIES" in watch_setup.ENV_TEMPLATE
 
 
 def _fake_certifi_env(tmp_path: Path, cacert_text: str) -> tuple[dict, Path]:

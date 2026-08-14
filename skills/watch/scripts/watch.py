@@ -57,6 +57,14 @@ def main() -> int:
              "(default: WATCH_PROXY in ~/.config/watch/.env, or none).",
     )
     ap.add_argument(
+        "--cookies",
+        type=str,
+        default=None,
+        help="Path to a Netscape-format cookies.txt exported from a logged-in YouTube "
+             "session, passed to yt-dlp. Fixes YouTube's bot-check on sandboxed/"
+             "datacenter IPs (default: WATCH_COOKIES in ~/.config/watch/.env, or none).",
+    )
+    ap.add_argument(
         "--no-whisper",
         action="store_true",
         help="Disable Whisper fallback. Report frames-only if no captions available.",
@@ -78,6 +86,7 @@ def main() -> int:
     config = get_config()
     detail = args.detail or str(config["detail"])
     proxy = args.proxy or config.get("proxy")
+    cookies = args.cookies or config.get("cookies")
     configured_cap = frame_cap(detail)
     if args.max_frames is not None:
         max_frames = args.max_frames
@@ -104,7 +113,7 @@ def main() -> int:
 
     if url_source:
         print("[watch] checking metadata/captions via yt-dlp…", file=sys.stderr)
-        dl = fetch_captions(args.source, work / "download", proxy=proxy)
+        dl = fetch_captions(args.source, work / "download", proxy=proxy, cookies=cookies)
         if dl.get("subtitle_path"):
             try:
                 transcript_segments = parse_vtt(dl["subtitle_path"])
@@ -131,6 +140,7 @@ def main() -> int:
                 work / "download",
                 audio_only=audio_only,
                 proxy=proxy,
+                cookies=cookies,
             )
         else:
             print("[watch] using local file…", file=sys.stderr)
@@ -282,6 +292,8 @@ def main() -> int:
     print(f"- **Source:** {args.source}")
     if proxy and url_source:
         print(f"- **Proxy:** {proxy}")
+    if cookies and url_source:
+        print(f"- **Cookies:** {cookies}")
     if info.get("title"):
         print(f"- **Title:** {info['title']}")
     if info.get("uploader"):

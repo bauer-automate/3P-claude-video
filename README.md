@@ -200,12 +200,18 @@ Other knobs (passed to `scripts/watch.py`):
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the one before them (held slides, static screen recordings, paused video), so the frame budget is spent on distinct content; this flag turns that off.
 - `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
 - `--proxy URL` — route yt-dlp through an HTTP/HTTPS/SOCKS proxy (e.g. `socks5://127.0.0.1:1080`). Default: `WATCH_PROXY` in `~/.config/watch/.env`. See [Running in a blocked network](#running-in-a-blocked-network).
+- `--cookies PATH` — path to a Netscape-format `cookies.txt` exported from a logged-in YouTube session. Default: `WATCH_COOKIES` in `~/.config/watch/.env`. See [Running in a blocked network](#running-in-a-blocked-network) — this is the first thing to try for a YouTube bot-check.
 
 ## Running in a blocked network
 
-Two different things can break a download, and they need different fixes:
+Three different things can break a download, and they need different fixes — `/watch` detects each from yt-dlp's own error and tells you which:
 
-**YouTube is blocking the request itself** (bot-check page, flat 403, no allowlist wording) — common for sandboxed/cloud agent environments, since YouTube blocks whole ranges of datacenter IPs outright. Point `/watch` at a proxy running somewhere YouTube doesn't block — typically your own workstation:
+**YouTube is bot-checking this IP** (`Sign in to confirm you're not a bot`) — common for sandboxed/cloud agent environments, since YouTube flags whole ranges of datacenter IPs regardless of yt-dlp version or anything this skill does; `youtube.com`/`googlevideo.com` being fully reachable doesn't help, it's IP reputation, not domain access. Try cookies first:
+
+1. Log into YouTube in a private/incognito window, export cookies to a `cookies.txt` file (Netscape format — a browser extension, or see the [yt-dlp wiki](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)), then close the window **without logging out** (logging out invalidates the export).
+2. Set `WATCH_COOKIES=/path/to/cookies.txt` in `~/.config/watch/.env`, or pass `--cookies` for a single call.
+
+Cookies help but aren't a guarantee on datacenter IPs — an authenticated session can still get bot-checked from a flagged IP range. For heavy or recurring use, a proxy from a network YouTube doesn't block tends to be more reliable:
 
 ```bash
 # On the workstation: a local SOCKS5 listener via SSH (or microsocks/tinyproxy)
@@ -220,7 +226,7 @@ WATCH_PROXY=socks5://127.0.0.1:1080
 
 in `~/.config/watch/.env`, or pass `--proxy` for a single call. `/watch` doesn't ship or manage the proxy — point it at infrastructure you already control.
 
-**Your own network is blocking the request** (yt-dlp's error mentions "not in allowlist" / "blocked by policy" / a TLS `CERTIFICATE_VERIFY_FAILED`) — `/watch` now detects both and tells you which:
+**Your own network is blocking the request** (yt-dlp's error mentions "not in allowlist" / "blocked by policy" / a TLS `CERTIFICATE_VERIFY_FAILED`) — a different problem from the bot-check above; `/watch` detects both of these too:
 - An **egress/allowlist denial** means your environment's own network policy needs the reported host added — for YouTube, both the page host and `*.googlevideo.com` (video segments are served from a different host than the page).
 - A **TLS certificate error** usually means a TLS-intercepting proxy whose CA is in the OS trust store but not in yt-dlp's bundled `certifi` CA file (`SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` don't affect yt-dlp). `/watch` fixes this itself on the first `CERTIFICATE_VERIFY_FAILED` — it merges the OS trust store into `certifi`'s bundle (same as `--merge-ca` below, backing up the original first) and retries once, logging what it did to stderr either way. You only need to run these yourself if that auto-remediation couldn't apply or didn't fix it:
   ```bash

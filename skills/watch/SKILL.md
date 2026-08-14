@@ -1,6 +1,6 @@
 ---
 name: watch
-version: "0.3.1"
+version: "0.4.0"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or Whisper API fallback), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
@@ -101,7 +101,7 @@ WATCH_DETAIL=balanced
 
 Use the user's selected value. If they skip the question, keep the recommended default. Once dependencies, the API-key choice, and this preference are handled, write or update `SETUP_COMPLETE=true` in the same file. Do not ask this preference question again when `SETUP_COMPLETE=true`.
 
-**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, config_file, watch_detail, proxy_configured, tls_patched, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a key is encouraged, so a keyless first run reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a key is set OR setup was already completed). Branch on `can_proceed`/`first_run` to decide whether to run; use `status` to decide what to encourage. `proxy_configured` and `tls_patched` are informational only — neither gates `can_proceed`; they're there so you can tell the user their proxy/CA-merge setup took effect without a separate lookup.
+**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, config_file, watch_detail, proxy_configured, cookies_configured, tls_patched, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a key is encouraged, so a keyless first run reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a key is set OR setup was already completed). Branch on `can_proceed`/`first_run` to decide whether to run; use `status` to decide what to encourage. `proxy_configured`, `cookies_configured`, and `tls_patched` are informational only — none of them gate `can_proceed`; they're there so you can tell the user their proxy/cookies/CA-merge setup took effect without a separate lookup.
 
 Within a single session, you can skip Step 0 on follow-up `/watch` calls — once `--check` returned 0, nothing about the environment changes between turns.
 
@@ -148,6 +148,7 @@ Optional flags:
 - `--fps F` — override auto-fps (clamped to 2 fps max)
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
 - `--proxy URL` — route yt-dlp through an HTTP/HTTPS/SOCKS proxy (e.g. `socks5://127.0.0.1:1080`). Default: `WATCH_PROXY` in `~/.config/watch/.env`, or none. See "Downloading through a proxy" below — this is what you reach for when YouTube itself (not your network policy) is blocking the request.
+- `--cookies PATH` — path to a Netscape-format `cookies.txt` exported from a logged-in YouTube session, passed to yt-dlp. Default: `WATCH_COOKIES` in `~/.config/watch/.env`, or none. See "YouTube bot-check (cookies)" below — this is the first thing to try when a download fails with "Sign in to confirm you're not a bot."
 - `--whisper groq|openai` — force a specific Whisper backend (default: prefer Groq if both keys exist)
 - `--no-whisper` — disable the Whisper fallback entirely (frames-only if no captions)
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the previous kept one (held slides, static screen recordings, paused video) so the frame budget goes to distinct content; the report's **Frames** line notes how many were dropped. Pass this only if the user needs every sampled frame (e.g. judging subtle frame-to-frame motion).
@@ -230,9 +231,26 @@ The script gets a timestamped transcript in one of two ways:
 
 Both keys live in `~/.config/watch/.env`. The script prefers Groq when both are set; override with `--whisper openai` to force OpenAI. Use `--no-whisper` to skip the fallback entirely.
 
+## YouTube bot-check (cookies)
+
+If a download fails with `Sign in to confirm you're not a bot`, that's YouTube flagging this IP as a bot — common on sandboxed/datacenter IPs, and unrelated to network allowlisting: `youtube.com`/`googlevideo.com` being fully reachable doesn't help, because this is IP reputation, not domain access. The script detects this and raises that explanation instead of yt-dlp's raw error.
+
+Try this first, before reaching for a proxy:
+
+1. Open a private/incognito browser window and log into YouTube.
+2. Export cookies to a `cookies.txt` file (Netscape format) — a browser extension, or yt-dlp's own cookie export tooling; see the [yt-dlp wiki on exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+3. Close the private window **without logging out** — logging out invalidates the exported cookies.
+4. Set `WATCH_COOKIES` in `~/.config/watch/.env` (or pass `--cookies` on a single call):
+   ```
+   WATCH_COOKIES=/path/to/cookies.txt
+   ```
+5. Re-run `/watch <url>` — the report's **Cookies** line confirms it was used.
+
+Cookies help but aren't a guarantee on datacenter IPs — YouTube can still bot-check an authenticated session from a flagged IP range. For heavy or recurring use, running `/watch` from a real workstation IP (see "Downloading through a proxy" below) tends to be more reliable than cookies alone, since residential/office IPs are rarely flagged.
+
 ## Downloading through a proxy
 
-Some environments — sandboxed/cloud agent environments in particular — get a bot-check page or a flat 403 straight from YouTube because YouTube blocks whole ranges of datacenter IPs, independent of anything your own network policy allows. That's a different problem from the network/egress-policy block described below, and `--merge-ca`/`--restore-ca` won't fix it — the fix is to route the request through a network YouTube doesn't block, most commonly the user's own workstation:
+Some environments — sandboxed/cloud agent environments in particular — get a bot-check page or a flat 403 straight from YouTube because YouTube blocks whole ranges of datacenter IPs, independent of anything your own network policy allows. If cookies (above) don't hold up under repeated use, or you'd rather not manage cookie exports, route the request through a network YouTube doesn't block instead — most commonly the user's own workstation. Either fix is unrelated to the network/egress-policy block described below, and `--merge-ca`/`--restore-ca` won't fix this case:
 
 1. On the workstation, run a small SOCKS5 or HTTP proxy (e.g. `ssh -N -D 1080 localhost` for a local SOCKS5 listener, or any lightweight proxy such as `microsocks`/`tinyproxy`).
 2. Make that proxy reachable from wherever `/watch` runs — a private network like Tailscale, an SSH reverse tunnel, or a tunnel service like `ngrok`/`cloudflared` that exposes it at a stable address. If this environment enforces its own outbound allowlist, the proxy's host must be added to it too (see the "Network/egress policy block" failure mode below).
@@ -249,10 +267,11 @@ Some environments — sandboxed/cloud agent environments in particular — get a
 - **Setup preflight failed** → run `python3 "${SKILL_DIR}/scripts/setup.py"` (auto-installs `ffmpeg`+`yt-dlp` via brew on macOS; on Linux auto-installs `yt-dlp` via `pipx`/`pip --user` and prints the `apt`/`dnf` command for `ffmpeg`, which needs sudo; scaffolds the `.env`). For API key, ask the user via `AskUserQuestion` and write it to `~/.config/watch/.env`.
 - **No transcript available** → captions missing AND (no Whisper key OR Whisper API failed). Script prints a hint pointing to setup. Proceed frames-only and tell the user.
 - **Long video warning printed** → acknowledge it in your answer. Offer to re-run focused on a specific section via `--start`/`--end` rather than a sparse full-video scan.
-- **Download fails** → the script now classifies two specific network causes and raises a distinct message instead of yt-dlp's generic extraction error; otherwise yt-dlp's raw error goes to stderr as before.
+- **Download fails** → the script now classifies three specific causes and raises a distinct message instead of yt-dlp's generic extraction error; otherwise yt-dlp's raw error goes to stderr as before.
+  - **YouTube bot-check** (message mentions "Sign in to confirm you're not a bot") → YouTube is flagging this IP as a bot, common on sandboxed/datacenter IPs — this is IP reputation, not a domain-allowlist problem, so it happens even with `youtube.com`/`googlevideo.com` fully reachable. Fix: `--cookies`/`WATCH_COOKIES` — see "YouTube bot-check (cookies)" above. If cookies alone don't hold up under repeated use, pair them with (or fall back to) a proxy from a network YouTube doesn't block — see "Downloading through a proxy" below.
   - **TLS certificate verification failed** (message mentions `CERTIFICATE_VERIFY_FAILED` / "self-signed certificate in certificate chain") → yt-dlp verifies against its own bundled `certifi` CA file, not the OS trust store — `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` have no effect on it. This is what a TLS-intercepting egress proxy looks like (common in sandboxed/enterprise networks) even when the host is otherwise reachable and `curl` to it succeeds. **The script auto-remediates this itself**: on the first `CERTIFICATE_VERIFY_FAILED`, it runs the same merge as `setup.py --merge-ca` (backing up the original bundle first) and retries once before raising anything — a stderr line says so either way. You only see the raised error if that auto-merge couldn't apply (e.g. no OS trust store found in known locations) or didn't fix it; at that point set `SSL_CERT_FILE` to the right bundle and re-run, or run `python3 "${SKILL_DIR}/scripts/setup.py" --merge-ca` manually once it's in place (undo with `--restore-ca`).
   - **Network/egress policy block** (message says "network/egress policy block", or stderr otherwise mentions "not in allowlist" / "blocked by policy" / "forbidden by proxy") → this environment's own network layer is denying the request, not the video host. Tell the user their outbound allowlist needs the reported host — and for YouTube specifically, both the page host and `*.googlevideo.com` (video/audio segments are served from a different host than the page).
-  - **Neither pattern matched** (plain 403 / "Sign in to confirm you're not a bot", or a login-required / region-locked video) → for the bot-check case, this is usually YouTube blocking the sandbox's IP range outright — see "Downloading through a proxy" above. For login-required/region-locked videos, tell the user plainly; do not keep retrying.
+  - **Neither pattern matched** (a login-required or region-locked video) → tell the user plainly; do not keep retrying.
 - **Whisper request fails** → the error is printed to stderr (likely: invalid key or rate limit). Audio over the API's 25 MB upload cap is split into chunks and transcribed automatically, so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk fails. You can retry with `--whisper openai` if Groq failed (or vice versa).
 
 ## Token efficiency
@@ -272,13 +291,14 @@ If you already watched a video this session and the user asks a follow-up, do **
 - Sends the extracted audio clip to Groq's Whisper API (`api.groq.com/openai/v1/audio/transcriptions`) when `GROQ_API_KEY` is set (preferred — cheaper, faster)
 - Sends the extracted audio clip to OpenAI's audio transcription API (`api.openai.com/v1/audio/transcriptions`) when `OPENAI_API_KEY` is set and Groq is not, or when `--whisper openai` is forced
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
-- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s), an optional `WATCH_PROXY`, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
+- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s), an optional `WATCH_PROXY` / `WATCH_COOKIES`, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 - On Linux, `setup.py` installs `yt-dlp` via `pipx` or `pip install --user` (user-space, no sudo) when it's missing — `ffmpeg`/`ffprobe` still just print an `apt`/`dnf` command, since those need sudo
 - Copies certs from the OS trust store into yt-dlp's bundled `certifi` CA file, after backing up the original — automatically, once, the first time a download hits `CERTIFICATE_VERIFY_FAILED` (same effect as `setup.py --merge-ca`; always logged to stderr when it happens), and manually via `setup.py --merge-ca` / `setup.py --restore-ca`
+- When `WATCH_COOKIES`/`--cookies` is set, passes that `cookies.txt` file straight through to yt-dlp (`--cookies <path>`) so requests carry the logged-in YouTube session it contains — this is opt-in and points at a file the user already created and controls; the skill never captures, generates, or exfiltrates cookies itself
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio goes out, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`
-- Does not access any platform account (no login, no session cookies, no posting) — yt-dlp only ever requests public data
+- Does not access any platform account by default — with no `--cookies`/`WATCH_COOKIES` set, yt-dlp only ever requests public data, no login, no posting. Cookies are opt-in, read-only from a file the user exports themselves, and used solely to authenticate yt-dlp's own read requests — the skill never logs into anything or takes any action beyond downloading
 - Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
 - Does not log, cache, or write API keys to stdout, stderr, or output files
 - Does not persist anything outside the working directory and `~/.config/watch/.env` — clean up the working directory when you're done (Step 5)
