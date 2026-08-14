@@ -101,6 +101,39 @@ def test_fetch_captions_passes_proxy_when_set(monkeypatch, tmp_path):
     assert argv[argv.index("--proxy") + 1] == "http://127.0.0.1:8080"
 
 
+def test_download_url_passes_cookies_when_set(monkeypatch, tmp_path):
+    calls = _capture_argv(monkeypatch)
+    with pytest.raises(SystemExit):
+        download.download_url(URL, tmp_path / "download", cookies="/home/user/cookies.txt")
+    argv = calls[0]
+    assert "--cookies" in argv
+    assert argv[argv.index("--cookies") + 1] == "/home/user/cookies.txt"
+
+
+def test_download_url_omits_cookies_when_unset(monkeypatch, tmp_path):
+    calls = _capture_argv(monkeypatch)
+    with pytest.raises(SystemExit):
+        download.download_url(URL, tmp_path / "download")
+    assert "--cookies" not in calls[0]
+
+
+def test_fetch_captions_passes_cookies_when_set(monkeypatch, tmp_path):
+    calls = _capture_argv(monkeypatch)
+    download.fetch_captions(URL, tmp_path / "download", cookies="/home/user/cookies.txt")
+    argv = calls[0]
+    assert "--cookies" in argv
+    assert argv[argv.index("--cookies") + 1] == "/home/user/cookies.txt"
+
+
+def test_download_passes_cookies_through_to_download_url(monkeypatch, tmp_path):
+    calls = _capture_argv(monkeypatch)
+    with pytest.raises(SystemExit):
+        download.download(URL, tmp_path / "download", cookies="/home/user/cookies.txt")
+    argv = calls[0]
+    assert "--cookies" in argv
+    assert argv[argv.index("--cookies") + 1] == "/home/user/cookies.txt"
+
+
 class _FakeCompletedProcess:
     def __init__(self, returncode=1, stdout="", stderr=""):
         self.returncode = returncode
@@ -126,6 +159,53 @@ def test_classify_egress_denial():
 
 def test_classify_unknown_failure_returns_none():
     assert download.classify_yt_dlp_failure("ERROR: Video unavailable") is None
+
+
+def test_classify_bot_check_straight_apostrophe():
+    output = (
+        "ERROR: [youtube] abc123: Sign in to confirm you're not a bot. Use "
+        "--cookies-from-browser or --cookies for the authentication."
+    )
+    assert download.classify_yt_dlp_failure(output) == "bot_check"
+
+
+def test_classify_bot_check_curly_apostrophe():
+    output = "ERROR: [youtube] abc123: Sign in to confirm you’re not a bot."
+    assert download.classify_yt_dlp_failure(output) == "bot_check"
+
+
+def test_download_url_surfaces_bot_check_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        download.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            stderr="ERROR: [youtube] abc123: Sign in to confirm you're not a bot. "
+            "Use --cookies-from-browser or --cookies for the authentication."
+        ),
+    )
+    with pytest.raises(SystemExit, match="bot-checking this IP"):
+        download.download_url(URL, tmp_path / "download")
+
+
+def test_bot_check_does_not_trigger_auto_merge(monkeypatch, tmp_path):
+    """The TLS auto-merge retry is TLS-specific — a bot-check failure must
+    never trigger it."""
+    merge_calls = []
+    monkeypatch.setattr(
+        download.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            stderr="Sign in to confirm you're not a bot."
+        ),
+    )
+    monkeypatch.setattr(
+        download.tls_fix,
+        "merge_system_ca",
+        lambda: merge_calls.append(1) or {"ok": True, "reason": "merged"},
+    )
+    with pytest.raises(SystemExit, match="bot-checking this IP"):
+        download.download_url(URL, tmp_path / "download")
+    assert merge_calls == []
 
 
 def test_download_url_surfaces_tls_cert_failure(monkeypatch, tmp_path):

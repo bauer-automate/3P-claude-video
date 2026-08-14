@@ -34,19 +34,26 @@ _EGRESS_DENIAL_MARKERS = (
     "egress policy",
     "egress gateway",
 )
+_BOT_CHECK_MARKERS = (
+    "sign in to confirm you're not a bot",
+    "sign in to confirm you’re not a bot",  # yt-dlp uses a curly apostrophe (’) in this string
+    "confirm you're not a bot",
+)
 
 
 def classify_yt_dlp_failure(output: str) -> str | None:
     """Best-effort classification of a yt-dlp failure from its combined output.
 
-    Returns "tls_cert", "egress_denied", or None (unrecognized — fall back to
-    yt-dlp's own generic error).
+    Returns "tls_cert", "egress_denied", "bot_check", or None (unrecognized
+    — fall back to yt-dlp's own generic error).
     """
     lower = output.lower()
     if any(marker in lower for marker in _TLS_CERT_MARKERS):
         return "tls_cert"
     if any(marker in lower for marker in _EGRESS_DENIAL_MARKERS):
         return "egress_denied"
+    if any(marker in lower for marker in _BOT_CHECK_MARKERS):
+        return "bot_check"
     return None
 
 
@@ -76,6 +83,18 @@ def _failure_message(kind: str, url: str) -> str:
             f"environment's outbound allowlist for `{host}`. Note YouTube serves "
             "video/audio segments from `*.googlevideo.com`, a different host than the "
             "page itself, so both need to be allowlisted."
+        )
+    if kind == "bot_check":
+        return (
+            "YouTube is bot-checking this IP (common on sandboxed/datacenter IPs, not a "
+            "skill or network-policy issue — this happens even with youtube.com/"
+            "googlevideo.com fully reachable, since it's IP reputation, not domain "
+            "access). Fix: pass --cookies <path to cookies.txt> (or set WATCH_COOKIES) "
+            "exported from a logged-in YouTube session (private window, export, close "
+            "without logging out — logging out invalidates the export). Cookies help but "
+            "are not guaranteed on datacenter IPs; for heavy/recurring use, running "
+            "/watch via Claude Code on a real workstation IP is more reliable since "
+            "residential/office IPs are rarely flagged."
         )
     return "yt-dlp request failed for an unrecognized reason — see the output above."
 
@@ -173,7 +192,12 @@ def _pick_video(out_dir: Path) -> Path | None:
     return None
 
 
-def fetch_captions(url: str, out_dir: Path, proxy: str | None = None) -> dict:
+def fetch_captions(
+    url: str,
+    out_dir: Path,
+    proxy: str | None = None,
+    cookies: str | None = None,
+) -> dict:
     """Fetch metadata and best available VTT captions without downloading video."""
     if shutil.which("yt-dlp") is None:
         raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
@@ -195,6 +219,8 @@ def fetch_captions(url: str, out_dir: Path, proxy: str | None = None) -> dict:
     ]
     if proxy:
         cmd += ["--proxy", proxy]
+    if cookies:
+        cmd += ["--cookies", cookies]
     cmd += ["--", url]
     _, output = _run_yt_dlp_with_tls_retry(cmd)
     subtitle = _pick_subtitle(out_dir)
@@ -233,6 +259,7 @@ def download_url(
     out_dir: Path,
     audio_only: bool = False,
     proxy: str | None = None,
+    cookies: str | None = None,
 ) -> dict:
     if shutil.which("yt-dlp") is None:
         raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
@@ -258,6 +285,8 @@ def download_url(
     ]
     if proxy:
         cmd += ["--proxy", proxy]
+    if cookies:
+        cmd += ["--cookies", cookies]
     cmd += ["--", url]
 
     # yt-dlp may exit non-zero if a subtitle variant fails (e.g. 429) even when
@@ -288,9 +317,10 @@ def download(
     out_dir: Path,
     audio_only: bool = False,
     proxy: str | None = None,
+    cookies: str | None = None,
 ) -> dict:
     if is_url(source):
-        return download_url(source, out_dir, audio_only=audio_only, proxy=proxy)
+        return download_url(source, out_dir, audio_only=audio_only, proxy=proxy, cookies=cookies)
     return resolve_local(source)
 
 

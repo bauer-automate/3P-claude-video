@@ -71,6 +71,20 @@ OPENAI_API_KEY=
 # what you're hitting, point this at a proxy running somewhere YouTube
 # doesn't block (commonly your own workstation) and route through it:
 # WATCH_PROXY=socks5://127.0.0.1:1080
+
+# Optional cookies.txt for yt-dlp's requests (Netscape format, exported from
+# a logged-in YouTube session). Leave unset to make unauthenticated requests.
+#
+# If a video fails with "Sign in to confirm you're not a bot", that's
+# YouTube bot-checking this IP (common on sandboxed/datacenter IPs) — not a
+# skill or network problem. Export cookies from a private/incognito window
+# (then close it without logging out — logging out invalidates the export)
+# and point this at the file:
+# WATCH_COOKIES=/path/to/cookies.txt
+#
+# Cookies help but aren't guaranteed on datacenter IPs. For heavy or
+# recurring use, WATCH_PROXY pointed at a real workstation IP tends to be
+# more reliable than cookies alone.
 """
 
 
@@ -329,6 +343,7 @@ def _status() -> dict:
         "config_file": str(CONFIG_FILE),
         "watch_detail": cfg["detail"],
         "proxy_configured": bool(cfg.get("proxy")),
+        "cookies_configured": bool(cfg.get("cookies")),
         "tls_patched": tls_patched,
         "platform": platform.system(),
     }

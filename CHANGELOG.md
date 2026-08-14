@@ -2,6 +2,12 @@
 
 All notable changes to `/watch` are documented here.
 
+## [0.4.0] — 2026-08-13
+
+### Added
+- **`--cookies` / `WATCH_COOKIES`** — pass a Netscape-format `cookies.txt` exported from a logged-in YouTube session straight through to yt-dlp. Fixes YouTube's IP-based bot-check (`Sign in to confirm you're not a bot`), which datacenter/sandboxed IPs hit regardless of network allowlisting (`youtube.com`/`googlevideo.com` being reachable doesn't help — it's IP reputation, not domain access). The report's **Cookies** line confirms when one was used.
+- **Bot-check failure classification** — `download.py`'s `classify_yt_dlp_failure()` now recognizes the "Sign in to confirm you're not a bot" message and raises specific guidance (try `--cookies`, then a proxy for heavy/recurring use) instead of yt-dlp's raw error. `setup.py --json` also reports `cookies_configured`.
+
 ## [0.3.1] — 2026-08-13
 
 ### Fixed

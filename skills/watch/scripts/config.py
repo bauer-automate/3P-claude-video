@@ -57,10 +57,12 @@ def get_config() -> dict[str, object]:
         detail = DEFAULT_DETAIL
 
     proxy = (os.environ.get("WATCH_PROXY") or file_values.get("WATCH_PROXY") or "").strip()
+    cookies = (os.environ.get("WATCH_COOKIES") or file_values.get("WATCH_COOKIES") or "").strip()
 
     return {
         "detail": detail,
         "proxy": proxy or None,
+        "cookies": cookies or None,
         "config_file": str(CONFIG_FILE),
     }
 

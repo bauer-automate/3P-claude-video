@@ -25,9 +25,10 @@ def test_invalid_detail_falls_back_to_default(monkeypatch, tmp_path):
 def test_get_config_keys(monkeypatch, tmp_path):
     monkeypatch.delenv("WATCH_DETAIL", raising=False)
     monkeypatch.delenv("WATCH_PROXY", raising=False)
+    monkeypatch.delenv("WATCH_COOKIES", raising=False)
     monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
     cfg = config.get_config()
-    assert set(cfg) == {"detail", "proxy", "config_file"}
+    assert set(cfg) == {"detail", "proxy", "cookies", "config_file"}
 
 
 def test_proxy_defaults_to_none(monkeypatch, tmp_path):
@@ -48,6 +49,26 @@ def test_proxy_from_env_file(tmp_path, monkeypatch):
     env_file.write_text("WATCH_PROXY=http://127.0.0.1:8080\n", encoding="utf-8")
     monkeypatch.setattr(config, "CONFIG_FILE", env_file)
     assert config.get_config()["proxy"] == "http://127.0.0.1:8080"
+
+
+def test_cookies_defaults_to_none(monkeypatch, tmp_path):
+    monkeypatch.delenv("WATCH_COOKIES", raising=False)
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
+    assert config.get_config()["cookies"] is None
+
+
+def test_env_overrides_cookies(monkeypatch, tmp_path):
+    monkeypatch.setenv("WATCH_COOKIES", "/home/user/cookies.txt")
+    monkeypatch.setattr(config, "CONFIG_FILE", tmp_path / "missing.env")
+    assert config.get_config()["cookies"] == "/home/user/cookies.txt"
+
+
+def test_cookies_from_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("WATCH_COOKIES", raising=False)
+    env_file = tmp_path / "watch.env"
+    env_file.write_text("WATCH_COOKIES=/home/user/cookies.txt\n", encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_FILE", env_file)
+    assert config.get_config()["cookies"] == "/home/user/cookies.txt"
 
 
 def test_frame_cap_mapping():
