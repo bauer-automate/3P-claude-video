@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
 
 
@@ -20,6 +21,23 @@ from download import download, fetch_captions, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract_at_timestamps, extract_keyframes, extract_scene_or_uniform, format_time, get_metadata, merge_frames, parse_time, parse_timestamps  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
+
+
+def _run_whisper(
+    video_path: str,
+    audio_out: Path,
+    backend: str,
+    api_key: str,
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+    focused: bool,
+) -> tuple[list[dict], str, str]:
+    """Run transcribe_video and shape the result into (segments, text, source)."""
+    all_segments, used_backend = transcribe_video(video_path, audio_out, backend=backend, api_key=api_key)
+    segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
+    text = format_transcript(segments)
+    return segments, text, f"whisper ({used_backend})"
 
 
 def main() -> int:
@@ -71,9 +89,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--whisper",
-        choices=["groq", "openai"],
+        choices=["groq", "openai", "local"],
         default=None,
-        help="Force a specific Whisper backend. Default: prefer Groq, fall back to OpenAI.",
+        help="Force a specific Whisper backend. Default: prefer a local server "
+             "(WATCH_WHISPER_URL) if configured, then Groq, then OpenAI.",
     )
     ap.add_argument(
         "--no-dedup",
@@ -259,22 +278,51 @@ def main() -> int:
         backend, api_key = load_api_key(args.whisper)
         if backend and api_key:
             try:
-                all_segments, used_backend = transcribe_video(
-                    video_path,
-                    work / "audio.mp3",
-                    backend=backend,
-                    api_key=api_key,
+                transcript_segments, transcript_text, transcript_source = _run_whisper(
+                    video_path, work / "audio.mp3", backend, api_key,
+                    start_sec=start_sec, end_sec=end_sec, focused=focused,
                 )
-                transcript_segments = filter_range(all_segments, start_sec, end_sec) if focused else all_segments
-                transcript_text = format_transcript(transcript_segments)
-                transcript_source = f"whisper ({used_backend})"
             except SystemExit as exc:
-                print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
+                # A local server (WATCH_WHISPER_URL) that's down or unreachable fails
+                # fast (whisper.py's local path uses attempts=1) with the original
+                # connection error chained on as __cause__. Retry once against a cloud
+                # backend — but only when the user didn't force `--whisper local`, and
+                # only for genuine connection failures (not e.g. a malformed response).
+                fallback_eligible = (
+                    backend == "local"
+                    and args.whisper != "local"
+                    and isinstance(
+                        exc.__cause__,
+                        (urllib.error.URLError, ConnectionRefusedError, TimeoutError, OSError),
+                    )
+                )
+                fb_backend, fb_key = load_api_key(exclude="local") if fallback_eligible else (None, None)
+                if fb_backend and fb_key:
+                    print(
+                        f"[watch] local whisper unreachable, falling back to {fb_backend}",
+                        file=sys.stderr,
+                    )
+                    try:
+                        transcript_segments, transcript_text, transcript_source = _run_whisper(
+                            video_path, work / "audio.mp3", fb_backend, fb_key,
+                            start_sec=start_sec, end_sec=end_sec, focused=focused,
+                        )
+                    except SystemExit as exc2:
+                        print(f"[watch] whisper fallback failed: {exc2}", file=sys.stderr)
+                elif fallback_eligible:
+                    setup_py = SCRIPT_DIR / "setup.py"
+                    print(
+                        "[watch] local whisper unreachable and no cloud Whisper API key found "
+                        f"— run `python3 {setup_py}` to enable the Whisper fallback",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"[watch] whisper fallback failed: {exc}", file=sys.stderr)
         else:
             hint = (
-                f"--whisper {args.whisper} was set but the matching API key is missing"
+                f"--whisper {args.whisper} was set but the matching API key/URL is missing"
                 if args.whisper else
-                "no subtitles and no Whisper API key found"
+                "no subtitles and no Whisper API key or WATCH_WHISPER_URL found"
             )
             setup_py = SCRIPT_DIR / "setup.py"
             print(

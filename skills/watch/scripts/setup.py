@@ -57,6 +57,21 @@ ENV_TEMPLATE = """# /watch API configuration
 GROQ_API_KEY=
 OPENAI_API_KEY=
 
+# Prefer a fully local Whisper instead of a cloud key? Point this at an
+# OpenAI-compatible server's base URL — a bare host, a "/v1" base, or the
+# full ".../v1/audio/transcriptions" path all work — and /watch sends audio
+# there instead of Groq/OpenAI. No API key needed, and the audio never
+# leaves this machine. When set, it wins over the keys above; force it
+# explicitly with `--whisper local`, or force a cloud key with `--whisper
+# groq`/`--whisper openai` instead.
+#
+# WATCH_WHISPER_URL=http://127.0.0.1:8321
+#
+# Optional extras for a local server:
+# WATCH_WHISPER_TOKEN=       # sent as "Authorization: Bearer ..." if your server checks one
+# WATCH_WHISPER_MODEL=whisper-1
+# WATCH_WHISPER_TIMEOUT=1800 # seconds; local transcription of a long file can be slow
+
 # Default watch behavior (the /watch first-run wizard sets this for you).
 # Allowed values: transcript | efficient | balanced | token-burner
 # Keep the value on its own line with no trailing comment.
@@ -143,6 +158,14 @@ def _read_env_key(name: str) -> str | None:
 
 
 def _have_api_key() -> tuple[bool, str | None]:
+    """True + a backend label if a Whisper backend is configured.
+
+    Checked in the same priority order as whisper.load_api_key(): a local
+    server (WATCH_WHISPER_URL) wins when set, since it needs no key at all;
+    otherwise Groq, then OpenAI.
+    """
+    if _read_env_key("WATCH_WHISPER_URL"):
+        return True, "local"
     if _read_env_key("GROQ_API_KEY"):
         return True, "groq"
     if _read_env_key("OPENAI_API_KEY"):
@@ -344,6 +367,7 @@ def _status() -> dict:
         "watch_detail": cfg["detail"],
         "proxy_configured": bool(cfg.get("proxy")),
         "cookies_configured": bool(cfg.get("cookies")),
+        "whisper_url_configured": bool(cfg.get("whisper_url")),
         "tls_patched": tls_patched,
         "platform": platform.system(),
     }
@@ -439,13 +463,15 @@ def cmd_install() -> int:
         return 0
 
     print("")
-    print("[setup] one step left: add a Whisper API key.")
+    print("[setup] one step left: add a Whisper API key, or point at a local server.")
     print("")
-    print(f"  Edit {CONFIG_FILE} and set either:")
-    print("    GROQ_API_KEY=...    (preferred — cheaper, faster; get one at console.groq.com/keys)")
-    print("    OPENAI_API_KEY=...  (fallback; get one at platform.openai.com/api-keys)")
+    print(f"  Edit {CONFIG_FILE} and set one of:")
+    print("    GROQ_API_KEY=...        (preferred — cheaper, faster; get one at console.groq.com/keys)")
+    print("    OPENAI_API_KEY=...      (fallback; get one at platform.openai.com/api-keys)")
+    print("    WATCH_WHISPER_URL=...   (local OpenAI-compatible server, e.g. http://127.0.0.1:8321 —")
+    print("                             no API key needed, audio never leaves this machine)")
     print("")
-    print("  Without a key, /watch still works but videos without captions come back frames-only.")
+    print("  Without one of these, /watch still works but videos without captions come back frames-only.")
     return 3
 
 

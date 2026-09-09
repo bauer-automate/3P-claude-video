@@ -81,3 +81,22 @@ def static_clip(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("clips") / "static.mp4"
     build_static_clip(path)
     return path
+
+
+# whisper.py's load_api_key()/_local_*() helpers read these straight from
+# os.environ (in-process, unlike test_setup.py's/test_watch.py's subprocess
+# _run() helpers, which build their own env dict). Scrub them for every test
+# so a developer's real local-whisper setup can't leak into an assertion
+# that didn't ask for it.
+_WHISPER_ENV_KEYS = (
+    "WATCH_WHISPER_URL",
+    "WATCH_WHISPER_TOKEN",
+    "WATCH_WHISPER_MODEL",
+    "WATCH_WHISPER_TIMEOUT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_whisper_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _WHISPER_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)

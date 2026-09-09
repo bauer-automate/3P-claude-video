@@ -50,6 +50,14 @@ def test_flag_overrides_env(cut_clip: Path):
     assert "(keyframe" in out
 
 
+def test_whisper_local_is_accepted_by_the_parser(cut_clip: Path):
+    # --no-whisper (already appended by _run()) means this never actually
+    # dials out to a local server — it just proves argparse accepts "local"
+    # as a --whisper choice and the run completes normally.
+    out = _run(cut_clip, "--detail", "efficient", "--whisper", "local")
+    assert "**Detail:** efficient" in out
+
+
 def test_default_is_balanced(cut_clip: Path):
     out = _run(cut_clip)  # no flag, WATCH_DETAIL cleared
     assert "**Detail:** balanced" in out
