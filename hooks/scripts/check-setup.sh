@@ -23,12 +23,18 @@ read_key() {
     return
   fi
   if [[ -f "$CONFIG_FILE" ]]; then
-    awk -F= -v k="$name" '
+    awk -v k="$name" '
       /^[[:space:]]*#/ { next }
-      $1 == k {
-        sub(/^[[:space:]]*/, "", $2); sub(/[[:space:]]*$/, "", $2);
-        gsub(/^["'\'']|["'\'']$/, "", $2);
-        print $2; exit
+      {
+        eq = index($0, "=")
+        if (eq == 0) next
+        key = substr($0, 1, eq - 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        if (key != k) next
+        val = substr($0, eq + 1)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", val)
+        gsub(/^["'\'']|["'\'']$/, "", val)
+        print val; exit
       }
     ' "$CONFIG_FILE"
   fi
@@ -41,6 +47,7 @@ command -v yt-dlp >/dev/null 2>&1 && HAS_YTDLP="yes"
 
 HAS_GROQ="$(read_key GROQ_API_KEY)"
 HAS_OPENAI="$(read_key OPENAI_API_KEY)"
+HAS_WHISPER_URL="$(read_key WATCH_WHISPER_URL)"
 SETUP_COMPLETE="$(read_key SETUP_COMPLETE)"
 
 # Fully configured → silent (Claude can surface status on demand via --check).
@@ -51,8 +58,8 @@ fi
 # First-run / partially-configured → one-line hint.
 if [[ -z "$HAS_FFMPEG" || -z "$HAS_YTDLP" ]]; then
   echo "/watch: needs ffmpeg + yt-dlp. Run \`python3 \$CLAUDE_PLUGIN_ROOT/skills/watch/scripts/setup.py\` once to install and scaffold config."
-elif [[ -z "$HAS_GROQ" && -z "$HAS_OPENAI" ]]; then
-  echo "/watch: ready for videos with native captions. Add GROQ_API_KEY (preferred) or OPENAI_API_KEY to ~/.config/watch/.env to unlock Whisper fallback."
+elif [[ -z "$HAS_GROQ" && -z "$HAS_OPENAI" && -z "$HAS_WHISPER_URL" ]]; then
+  echo "/watch: ready for videos with native captions. Add GROQ_API_KEY (preferred), OPENAI_API_KEY, or WATCH_WHISPER_URL (local server) to ~/.config/watch/.env to unlock Whisper fallback."
 else
   echo "/watch: ready."
 fi

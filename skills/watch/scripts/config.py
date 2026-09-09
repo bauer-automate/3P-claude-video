@@ -59,10 +59,27 @@ def get_config() -> dict[str, object]:
     proxy = (os.environ.get("WATCH_PROXY") or file_values.get("WATCH_PROXY") or "").strip()
     cookies = (os.environ.get("WATCH_COOKIES") or file_values.get("WATCH_COOKIES") or "").strip()
 
+    # Local Whisper server (see skills/watch/scripts/whisper.py). whisper_url
+    # configured wins over GROQ_API_KEY/OPENAI_API_KEY; token/model are
+    # optional overrides for a server that requires auth or a specific model
+    # name.
+    whisper_url = (
+        os.environ.get("WATCH_WHISPER_URL") or file_values.get("WATCH_WHISPER_URL") or ""
+    ).strip()
+    whisper_token = (
+        os.environ.get("WATCH_WHISPER_TOKEN") or file_values.get("WATCH_WHISPER_TOKEN") or ""
+    ).strip()
+    whisper_model = (
+        os.environ.get("WATCH_WHISPER_MODEL") or file_values.get("WATCH_WHISPER_MODEL") or ""
+    ).strip()
+
     return {
         "detail": detail,
         "proxy": proxy or None,
         "cookies": cookies or None,
+        "whisper_url": whisper_url or None,
+        "whisper_token": whisper_token or None,
+        "whisper_model": whisper_model or None,
         "config_file": str(CONFIG_FILE),
     }
 

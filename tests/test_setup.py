@@ -15,10 +15,15 @@ SETUP = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts" 
 def _run(args, *, home=None, extra_env=None):
     env = dict(os.environ)
     env.pop("WATCH_DETAIL", None)
-    # Don't let a real key in the developer's shell env leak into the test.
+    # Don't let a real key (or local-whisper config) in the developer's shell
+    # env leak into the test.
     env.pop("GROQ_API_KEY", None)
     env.pop("OPENAI_API_KEY", None)
     env.pop("SETUP_COMPLETE", None)
+    env.pop("WATCH_WHISPER_URL", None)
+    env.pop("WATCH_WHISPER_TOKEN", None)
+    env.pop("WATCH_WHISPER_MODEL", None)
+    env.pop("WATCH_WHISPER_TIMEOUT", None)
     if home is not None:
         env["HOME"] = str(home)
         env["USERPROFILE"] = str(home)  # Windows
@@ -108,6 +113,30 @@ def test_json_reports_cookies_configured_false_by_default(tmp_path):
 
 def test_env_template_mentions_watch_cookies():
     assert "WATCH_COOKIES" in watch_setup.ENV_TEMPLATE
+
+
+def test_env_template_mentions_watch_whisper_url():
+    assert "WATCH_WHISPER_URL" in watch_setup.ENV_TEMPLATE
+
+
+def test_json_reports_whisper_url_backend_and_configured(tmp_path):
+    """WATCH_WHISPER_URL alone (set in .env, not just the environment) is
+    enough to report both the local backend and whisper_url_configured —
+    it wins priority even with no cloud key present."""
+    _write_env(tmp_path, "WATCH_WHISPER_URL=http://127.0.0.1:8321\n")
+    js = json.loads(_run(["--json"], home=tmp_path).stdout)
+    assert js["whisper_backend"] == "local"
+    assert js["whisper_url_configured"] is True
+    assert js["has_api_key"] is True
+    # has_api_key=True rules out needs_key/needs_install_and_key; which of the
+    # remaining two depends on whether ffmpeg/yt-dlp are on this machine's PATH.
+    assert js["status"] in ("ready", "needs_install")
+
+
+def test_json_reports_whisper_url_configured_false_by_default(tmp_path):
+    _write_env(tmp_path, "GROQ_API_KEY=\nOPENAI_API_KEY=\n")
+    js = json.loads(_run(["--json"], home=tmp_path).stdout)
+    assert js["whisper_url_configured"] is False
 
 
 def _fake_certifi_env(tmp_path: Path, cacert_text: str) -> tuple[dict, Path]:

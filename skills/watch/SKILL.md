@@ -1,6 +1,6 @@
 ---
 name: watch
-version: "0.4.0"
+version: "0.5.0"
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or Whisper API fallback), and hands the result to Claude so it can answer questions about what's in the video.
 argument-hint: "<video-url-or-path> [question]"
 allowed-tools: Bash, Read, AskUserQuestion
@@ -83,7 +83,7 @@ python3 "${SKILL_DIR}/scripts/setup.py"
 
 On macOS with Homebrew, it auto-installs `ffmpeg` and `yt-dlp`. On Linux, it auto-installs `yt-dlp` too — via `pipx` if present, else `pip install --user` (retrying with `--break-system-packages` on distros that refuse a bare `pip install` outside a virtualenv) — since that's a pure user-space install with no sudo needed; `ffmpeg`/`ffprobe` need a system package manager (`apt`/`dnf`), which needs sudo, so those are never run automatically — it prints the exact command instead. On Windows, it prints the exact install commands for everything. It scaffolds `~/.config/watch/.env` with commented placeholders and default watch settings at `0600` perms.
 
-**If an API key is still missing after install:** use `AskUserQuestion` to ask the user whether they have a Groq API key (preferred — cheaper, faster) or an OpenAI key. Then write it into `~/.config/watch/.env` — set the matching `GROQ_API_KEY=...` or `OPENAI_API_KEY=...` line. If they don't want to set up Whisper, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
+**If a Whisper backend is still missing after install:** use `AskUserQuestion` to ask the user whether they have a Groq API key (preferred — cheaper, faster), an OpenAI key, or would rather run a local Whisper server instead (no API key, audio never leaves their machine — see "Transcription" below). Then write the answer into `~/.config/watch/.env`: set the matching `GROQ_API_KEY=...` / `OPENAI_API_KEY=...` line, or `WATCH_WHISPER_URL=...` (plus `WATCH_WHISPER_TOKEN=...` only if their server requires one). If they don't want to set up Whisper at all, proceed with `--no-whisper` and tell them videos without native captions will come back frames-only.
 
 **First-run watch preference:** after the installer has scaffolded `~/.config/watch/.env`, use `AskUserQuestion` to ask one question:
 
@@ -101,7 +101,7 @@ WATCH_DETAIL=balanced
 
 Use the user's selected value. If they skip the question, keep the recommended default. Once dependencies, the API-key choice, and this preference are handled, write or update `SETUP_COMPLETE=true` in the same file. Do not ask this preference question again when `SETUP_COMPLETE=true`.
 
-**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, config_file, watch_detail, proxy_configured, cookies_configured, tls_patched, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a key is encouraged, so a keyless first run reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a key is set OR setup was already completed). Branch on `can_proceed`/`first_run` to decide whether to run; use `status` to decide what to encourage. `proxy_configured`, `cookies_configured`, and `tls_patched` are informational only — none of them gate `can_proceed`; they're there so you can tell the user their proxy/cookies/CA-merge setup took effect without a separate lookup.
+**Structured mode (optional):** `python3 "${SKILL_DIR}/scripts/setup.py" --json` emits `{status, can_proceed, first_run, setup_complete, missing_binaries, whisper_backend, has_api_key, config_file, watch_detail, proxy_configured, cookies_configured, whisper_url_configured, tls_patched, platform}` where `status` is one of `ready | needs_install | needs_key | needs_install_and_key`. `status` describes the *ideal* state (a key is encouraged, so a keyless first run reads `needs_key`); `can_proceed` is the operational gate (binaries present AND a key is set OR setup was already completed). Branch on `can_proceed`/`first_run` to decide whether to run; use `status` to decide what to encourage. `whisper_backend` reads `"local"` when `WATCH_WHISPER_URL` is configured — it wins over `groq`/`openai`. `proxy_configured`, `cookies_configured`, `whisper_url_configured`, and `tls_patched` are informational only — none of them gate `can_proceed`; they're there so you can tell the user their proxy/cookies/local-whisper/CA-merge setup took effect without a separate lookup.
 
 Within a single session, you can skip Step 0 on follow-up `/watch` calls — once `--check` returned 0, nothing about the environment changes between turns.
 
@@ -149,7 +149,7 @@ Optional flags:
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir)
 - `--proxy URL` — route yt-dlp through an HTTP/HTTPS/SOCKS proxy (e.g. `socks5://127.0.0.1:1080`). Default: `WATCH_PROXY` in `~/.config/watch/.env`, or none. See "Downloading through a proxy" below — this is what you reach for when YouTube itself (not your network policy) is blocking the request.
 - `--cookies PATH` — path to a Netscape-format `cookies.txt` exported from a logged-in YouTube session, passed to yt-dlp. Default: `WATCH_COOKIES` in `~/.config/watch/.env`, or none. See "YouTube bot-check (cookies)" below — this is the first thing to try when a download fails with "Sign in to confirm you're not a bot."
-- `--whisper groq|openai` — force a specific Whisper backend (default: prefer Groq if both keys exist)
+- `--whisper groq|openai|local` — force a specific Whisper backend (default: prefer a local server if `WATCH_WHISPER_URL` is set, then Groq, then OpenAI)
 - `--no-whisper` — disable the Whisper fallback entirely (frames-only if no captions)
 - `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the previous kept one (held slides, static screen recordings, paused video) so the frame budget goes to distinct content; the report's **Frames** line notes how many were dropped. Pass this only if the user needs every sampled frame (e.g. judging subtle frame-to-frame motion).
 
@@ -186,7 +186,7 @@ python3 "${SKILL_DIR}/scripts/watch.py" "$URL" --start 1:12:00
 
 **Step 4 — answer the user.** You now have two streams of evidence:
 - **Frames** — what's on screen at each timestamp
-- **Transcript** — what's said at each timestamp. The report's header shows the source (`captions` = yt-dlp pulled native subs; `whisper (groq)` or `whisper (openai)` = transcribed by API).
+- **Transcript** — what's said at each timestamp. The report's header shows the source (`captions` = yt-dlp pulled native subs; `whisper (local)`, `whisper (groq)`, or `whisper (openai)` = transcribed via Whisper, local server first).
 
 If the user asked a specific question, answer it directly citing timestamps. If they didn't ask anything, summarize what happens in the video — structure, key moments, notable visuals, spoken content.
 
@@ -225,11 +225,12 @@ Behavior:
 The script gets a timestamped transcript in one of two ways:
 
 1. **Native captions (free, preferred).** yt-dlp pulls manual or auto-generated subtitles from the source platform if available.
-2. **Whisper API fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and uploads it to whichever Whisper API has a key configured:
-   - **Groq** — `whisper-large-v3`. Preferred default: cheaper, faster. Get a key at console.groq.com/keys.
-   - **OpenAI** — `whisper-1`. Fallback. Get a key at platform.openai.com/api-keys.
+2. **Whisper fallback.** If no captions came back (or the source is a local file), the script extracts audio (`ffmpeg -vn -ac 1 -ar 16000 -b:a 64k`, ~0.5 MB/min) and sends it to whichever backend is configured, in this priority order:
+   - **Local server** (`WATCH_WHISPER_URL`) — an OpenAI-compatible `/v1/audio/transcriptions` endpoint on the user's own machine or network, e.g. `http://127.0.0.1:8321`. No API key required — **the audio never leaves the machine the server runs on**, nothing goes to Groq or OpenAI. An optional `WATCH_WHISPER_TOKEN` is sent as a Bearer token if the server checks one; `WATCH_WHISPER_MODEL` (default `whisper-1`) and `WATCH_WHISPER_TIMEOUT` (default 1800s — local transcription can be slow) round it out. Wins over the cloud keys below when set, and has no upload-size cap (the whole audio file goes in one request, never chunked). If the server is unreachable, the script automatically retries once against a configured cloud key and logs the fallback to stderr; `--whisper local` forces it exclusively (no automatic fallback in that case).
+   - **Groq** — `whisper-large-v3`. Preferred cloud default: cheaper, faster. Get a key at console.groq.com/keys.
+   - **OpenAI** — `whisper-1`. Cloud fallback. Get a key at platform.openai.com/api-keys.
 
-Both keys live in `~/.config/watch/.env`. The script prefers Groq when both are set; override with `--whisper openai` to force OpenAI. Use `--no-whisper` to skip the fallback entirely.
+Configure any of these in `~/.config/watch/.env`. Override the automatic priority with `--whisper local|groq|openai`. Use `--no-whisper` to skip transcription entirely.
 
 ## YouTube bot-check (cookies)
 
@@ -272,7 +273,7 @@ Some environments — sandboxed/cloud agent environments in particular — get a
   - **TLS certificate verification failed** (message mentions `CERTIFICATE_VERIFY_FAILED` / "self-signed certificate in certificate chain") → yt-dlp verifies against its own bundled `certifi` CA file, not the OS trust store — `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE` have no effect on it. This is what a TLS-intercepting egress proxy looks like (common in sandboxed/enterprise networks) even when the host is otherwise reachable and `curl` to it succeeds. **The script auto-remediates this itself**: on the first `CERTIFICATE_VERIFY_FAILED`, it runs the same merge as `setup.py --merge-ca` (backing up the original bundle first) and retries once before raising anything — a stderr line says so either way. You only see the raised error if that auto-merge couldn't apply (e.g. no OS trust store found in known locations) or didn't fix it; at that point set `SSL_CERT_FILE` to the right bundle and re-run, or run `python3 "${SKILL_DIR}/scripts/setup.py" --merge-ca` manually once it's in place (undo with `--restore-ca`).
   - **Network/egress policy block** (message says "network/egress policy block", or stderr otherwise mentions "not in allowlist" / "blocked by policy" / "forbidden by proxy") → this environment's own network layer is denying the request, not the video host. Tell the user their outbound allowlist needs the reported host — and for YouTube specifically, both the page host and `*.googlevideo.com` (video/audio segments are served from a different host than the page).
   - **Neither pattern matched** (a login-required or region-locked video) → tell the user plainly; do not keep retrying.
-- **Whisper request fails** → the error is printed to stderr (likely: invalid key or rate limit). Audio over the API's 25 MB upload cap is split into chunks and transcribed automatically, so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk fails. You can retry with `--whisper openai` if Groq failed (or vice versa).
+- **Whisper request fails** → the error is printed to stderr (likely: an invalid cloud key/rate limit, or — for the local backend — the server isn't running). A local-server connection failure auto-falls-back to a configured cloud key once, logging it to stderr; `--whisper local` disables that fallback. Cloud audio over the 25 MB upload cap is split into chunks and transcribed automatically (the local backend has no cap and never chunks), so length alone won't fail it; if some chunks fail the transcript is partial and the dropped chunks are noted on stderr. The report will say "none available" only if every chunk (or the single local request) fails. Retry with `--whisper local`/`--whisper groq`/`--whisper openai` to force a specific backend.
 
 ## Token efficiency
 
@@ -288,23 +289,25 @@ If you already watched a video this session and the user asks a follow-up, do **
 **What this skill does:**
 - Runs `yt-dlp` locally to download the video and pull native captions when the source supports them (public data; the request goes directly to whatever host the URL points at, or through `WATCH_PROXY`/`--proxy` when one is configured)
 - Runs `ffmpeg` / `ffprobe` locally to extract frames as JPEGs and, when Whisper is needed, a mono 16 kHz audio clip
-- Sends the extracted audio clip to Groq's Whisper API (`api.groq.com/openai/v1/audio/transcriptions`) when `GROQ_API_KEY` is set (preferred — cheaper, faster)
-- Sends the extracted audio clip to OpenAI's audio transcription API (`api.openai.com/v1/audio/transcriptions`) when `OPENAI_API_KEY` is set and Groq is not, or when `--whisper openai` is forced
+- Sends the extracted audio clip to a local OpenAI-compatible server (`WATCH_WHISPER_URL`, e.g. `http://127.0.0.1:8321`) when configured — this wins over the cloud keys below, so with it set no audio leaves the machine that server runs on; an optional `WATCH_WHISPER_TOKEN` is sent as a Bearer token only to that same server
+- Sends the extracted audio clip to Groq's Whisper API (`api.groq.com/openai/v1/audio/transcriptions`) when `GROQ_API_KEY` is set and no local server is configured (preferred cloud option — cheaper, faster)
+- Sends the extracted audio clip to OpenAI's audio transcription API (`api.openai.com/v1/audio/transcriptions`) when `OPENAI_API_KEY` is set and neither a local server nor Groq apply, or when `--whisper openai` is forced
 - Writes the downloaded video, frames, audio, and an intermediate transcript to a working directory under the system temp dir (or `--out-dir` if specified) so Claude can `Read` them
-- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s), an optional `WATCH_PROXY` / `WATCH_COOKIES`, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
+- Reads / creates `~/.config/watch/.env` (mode `0600`) to store the Whisper API key(s) or local-server settings (`WATCH_WHISPER_URL` / `WATCH_WHISPER_TOKEN` / `WATCH_WHISPER_MODEL` / `WATCH_WHISPER_TIMEOUT`), an optional `WATCH_PROXY` / `WATCH_COOKIES`, and a `SETUP_COMPLETE` marker. As a fallback, also reads `.env` in the current working directory
 - On Linux, `setup.py` installs `yt-dlp` via `pipx` or `pip install --user` (user-space, no sudo) when it's missing — `ffmpeg`/`ffprobe` still just print an `apt`/`dnf` command, since those need sudo
 - Copies certs from the OS trust store into yt-dlp's bundled `certifi` CA file, after backing up the original — automatically, once, the first time a download hits `CERTIFICATE_VERIFY_FAILED` (same effect as `setup.py --merge-ca`; always logged to stderr when it happens), and manually via `setup.py --merge-ca` / `setup.py --restore-ca`
 - When `WATCH_COOKIES`/`--cookies` is set, passes that `cookies.txt` file straight through to yt-dlp (`--cookies <path>`) so requests carry the logged-in YouTube session it contains — this is opt-in and points at a file the user already created and controls; the skill never captures, generates, or exfiltrates cookies itself
 
 **What this skill does NOT do:**
 - Does not upload the video itself to any API — only the extracted audio goes out, and only when native captions are missing AND Whisper is not disabled with `--no-whisper`
+- Does not send audio anywhere when `WATCH_WHISPER_URL` is configured — with a local backend the extracted audio clip goes only to that server, never to Groq or OpenAI
 - Does not access any platform account by default — with no `--cookies`/`WATCH_COOKIES` set, yt-dlp only ever requests public data, no login, no posting. Cookies are opt-in, read-only from a file the user exports themselves, and used solely to authenticate yt-dlp's own read requests — the skill never logs into anything or takes any action beyond downloading
-- Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
-- Does not log, cache, or write API keys to stdout, stderr, or output files
+- Does not share credentials between backends (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`, `WATCH_WHISPER_TOKEN` only goes to `WATCH_WHISPER_URL`)
+- Does not log, cache, or write API keys or tokens to stdout, stderr, or output files
 - Does not persist anything outside the working directory and `~/.config/watch/.env` — clean up the working directory when you're done (Step 5)
-- Does not provide, run, or tunnel a proxy itself — `WATCH_PROXY`/`--proxy` must point at infrastructure the user already controls
+- Does not provide, run, or tunnel a proxy itself — `WATCH_PROXY`/`--proxy` must point at infrastructure the user already controls; the same goes for the local Whisper server behind `WATCH_WHISPER_URL`
 - Does not weaken TLS verification — the CA merge (automatic or manual) adds trust anchors from the OS's own store, it never disables certificate checking (no `--no-check-certificates` passthrough)
 
-**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (Groq / OpenAI clients), `scripts/setup.py` (preflight + installer), `scripts/tls_fix.py` (OS trust store ↔ certifi CA bundle merge/restore, invoked via `setup.py --merge-ca`/`--restore-ca`)
+**Bundled scripts:** `scripts/watch.py` (entry point), `scripts/download.py` (yt-dlp wrapper), `scripts/frames.py` (ffmpeg frame extraction), `scripts/transcribe.py` (caption selection + Whisper orchestration), `scripts/whisper.py` (local server / Groq / OpenAI clients), `scripts/setup.py` (preflight + installer), `scripts/tls_fix.py` (OS trust store ↔ certifi CA bundle merge/restore, invoked via `setup.py --merge-ca`/`--restore-ca`)
 
 Review scripts before first use to verify behavior.

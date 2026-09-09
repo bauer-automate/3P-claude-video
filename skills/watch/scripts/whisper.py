@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Transcribe a video via Groq or OpenAI Whisper API.
+"""Transcribe a video via a local Whisper server, Groq, or OpenAI.
 
-Strategy: extract audio (mono 16kHz mp3, tiny payload), upload to whichever
-API has a key. Returns segments in the same shape as transcribe.parse_vtt so
-the rest of the pipeline (filter_range, format_transcript) doesn't care where
-the transcript came from.
+Strategy: extract audio (mono 16kHz mp3, tiny payload), then upload it to
+whichever backend is configured. A local OpenAI-compatible server
+(WATCH_WHISPER_URL) wins when set — no API key, audio never leaves the
+machine — otherwise Groq, then OpenAI. Returns segments in the same shape as
+transcribe.parse_vtt so the rest of the pipeline (filter_range,
+format_transcript) doesn't care where the transcript came from.
 
-Pure stdlib — no `pip install groq` or `pip install openai` needed.
+Pure stdlib — no `pip install groq`/`openai`, or any local-server SDK, needed.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import uuid
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -32,8 +35,16 @@ GROQ_MODEL = "whisper-large-v3"
 OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_MODEL = "whisper-1"
 
+# A local OpenAI-compatible server (WATCH_WHISPER_URL) — no API key, audio
+# never leaves the machine. Wins over the cloud backends in load_api_key()
+# when configured; local_endpoint() below builds the full request URL from
+# whatever base form the user set.
+LOCAL_MODEL_DEFAULT = "whisper-1"
+LOCAL_TIMEOUT_DEFAULT = 1800  # generous — CPU transcription of a long file is slow
+
 # Both Groq's free tier and OpenAI whisper-1 cap uploads at 25 MB. We target a
 # margin under that so multipart framing overhead never pushes a chunk over.
+# The local backend has no such cap — transcribe_video() skips chunking for it.
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
 
@@ -62,54 +73,126 @@ def plan_chunks(
     return plan
 
 
-def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
-    """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
+def local_endpoint(base_url: str) -> str:
+    """Normalize a configured WATCH_WHISPER_URL into the full endpoint URL.
 
-    If `preferred` is "groq" or "openai", only that backend's key is considered.
+    Accepts a bare host (``http://127.0.0.1:8321``), a ``/v1`` base
+    (``http://127.0.0.1:8321/v1``), or the full path
+    (``http://127.0.0.1:8321/v1/audio/transcriptions``) — with or without a
+    trailing slash in any of those forms — and always returns
+    ``.../v1/audio/transcriptions`` with no trailing slash.
     """
-    def _from_env(name: str) -> str | None:
-        value = os.environ.get(name)
-        return value.strip() if value else None
+    base_url = base_url.strip()
+    path = urllib.parse.urlsplit(base_url).path.rstrip("/")
+    root = base_url.rstrip("/")
 
-    def _from_dotenv(path: Path, name: str) -> str | None:
-        if not path.exists():
-            return None
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                if key.strip() != name:
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
-                    value = value[1:-1]
-                return value or None
-        except OSError:
-            return None
+    if path.endswith("/audio/transcriptions"):
+        return root
+
+    root += "/"
+    suffix = "audio/transcriptions" if path.endswith("/v1") else "v1/audio/transcriptions"
+    return urllib.parse.urljoin(root, suffix)
+
+
+def _from_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    return value.strip() if value else None
+
+
+def _from_dotenv(path: Path, name: str) -> str | None:
+    if not path.exists():
         return None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() != name:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                value = value[1:-1]
+            return value or None
+    except OSError:
+        return None
+    return None
 
-    dotenv_paths = [
-        Path.home() / ".config" / "watch" / ".env",
-        Path.cwd() / ".env",
-    ]
 
-    candidates = (("GROQ_API_KEY", "groq"), ("OPENAI_API_KEY", "openai"))
+def _default_dotenv_paths() -> list[Path]:
+    return [Path.home() / ".config" / "watch" / ".env", Path.cwd() / ".env"]
+
+
+def _lookup(name: str, dotenv_paths: list[Path] | None = None) -> str | None:
+    """Environment first, then each dotenv path in order (first match wins)."""
+    value = _from_env(name)
+    if value:
+        return value
+    for path in (dotenv_paths if dotenv_paths is not None else _default_dotenv_paths()):
+        value = _from_dotenv(path, name)
+        if value:
+            return value
+    return None
+
+
+def load_api_key(
+    preferred: str | None = None,
+    *,
+    exclude: str | None = None,
+    dotenv_paths: list[Path] | None = None,
+) -> tuple[str, str] | tuple[None, None]:
+    """Return (backend, value). Prefers a local server, then Groq, then OpenAI.
+
+    "local" is checked first: when WATCH_WHISPER_URL is set, /watch talks to
+    that OpenAI-compatible server instead of a cloud API, no API key needed.
+    For "local" the returned `value` is the configured base URL, not an API
+    key — the URL takes the key's place in the tuple so it stays truthy for
+    callers that gate on `backend and api_key` (watch.py's dispatch check and
+    this module's transcribe_video "no key" check) without those callers
+    needing a local-specific branch. Pass it through local_endpoint() to get
+    the actual request URL.
+
+    `preferred` restricts consideration to a single backend ("local", "groq",
+    or "openai"); an unmatched preference returns (None, None). `exclude`
+    drops one backend from consideration — used to retry with a cloud backend
+    after a local server turns out to be unreachable. `dotenv_paths`
+    overrides the default `~/.config/watch/.env` + `./.env` lookup order (a
+    test seam).
+    """
+    candidates = (
+        ("WATCH_WHISPER_URL", "local"),
+        ("GROQ_API_KEY", "groq"),
+        ("OPENAI_API_KEY", "openai"),
+    )
     if preferred is not None:
         candidates = tuple(c for c in candidates if c[1] == preferred)
+    if exclude is not None:
+        candidates = tuple(c for c in candidates if c[1] != exclude)
 
     for key_name, backend in candidates:
-        value = _from_env(key_name)
-        if not value:
-            for candidate in dotenv_paths:
-                value = _from_dotenv(candidate, key_name)
-                if value:
-                    break
+        value = _lookup(key_name, dotenv_paths)
         if value:
             return backend, value
 
     return None, None
+
+
+def _local_token() -> str | None:
+    return _lookup("WATCH_WHISPER_TOKEN")
+
+
+def _local_model() -> str:
+    return _lookup("WATCH_WHISPER_MODEL") or LOCAL_MODEL_DEFAULT
+
+
+def _local_timeout() -> int:
+    raw = _lookup("WATCH_WHISPER_TIMEOUT")
+    if raw:
+        try:
+            return int(float(raw))
+        except ValueError:
+            pass
+    return LOCAL_TIMEOUT_DEFAULT
 
 
 def extract_audio(video_path: str, out_path: Path) -> Path:
@@ -234,7 +317,15 @@ MAX_429_RETRIES = 2
 RETRY_BASE_DELAY = 2.0
 
 
-def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> dict:
+def _post_whisper(
+    endpoint: str,
+    api_key: str | None,
+    model: str,
+    audio_path: Path,
+    *,
+    attempts: int = MAX_ATTEMPTS,
+    timeout: int = 300,
+) -> dict:
     fields = {
         "model": model,
         "response_format": "verbose_json",
@@ -242,23 +333,26 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
     }
     body, boundary = _build_multipart(fields, audio_path)
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         # Groq sits behind Cloudflare — the default `Python-urllib/3.x` UA
         # trips WAF rule 1010 (403) before auth even runs. Any non-default
         # UA clears it; we identify honestly.
         "User-Agent": "watch-skill/1.0 (+claude-code; python-urllib)",
     }
+    # A local server (WATCH_WHISPER_URL) typically has no auth configured —
+    # omit the header entirely rather than send "Bearer " with nothing after it.
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     context = ssl.create_default_context()
     rate_limit_hits = 0
     last_exc: Exception | None = None
     last_detail = ""
 
-    for attempt in range(MAX_ATTEMPTS):
+    for attempt in range(attempts):
         request = Request(endpoint, data=body, headers=headers, method="POST")
         try:
-            with urlopen(request, timeout=300, context=context) as response:
+            with urlopen(request, timeout=timeout, context=context) as response:
                 payload = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = _read_error_body(exc)
@@ -266,31 +360,31 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
 
             # 4xx other than 429 are client errors — no retry will fix them.
             if 400 <= exc.code < 500 and exc.code != 429:
-                raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                raise SystemExit(f"Whisper request failed: {exc}{detail}") from exc
 
             if exc.code == 429:
                 rate_limit_hits += 1
                 if rate_limit_hits >= MAX_429_RETRIES:
-                    raise SystemExit(f"Whisper request failed: {exc}{detail}")
+                    raise SystemExit(f"Whisper request failed: {exc}{detail}") from exc
                 delay = _retry_after(exc) or RETRY_BASE_DELAY * (2 ** attempt) + 1
             else:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
 
-            if attempt < MAX_ATTEMPTS - 1:
+            if attempt < attempts - 1:
                 print(
                     f"[watch] whisper HTTP {exc.code} — retrying in {delay:.1f}s "
-                    f"(attempt {attempt + 2}/{MAX_ATTEMPTS})",
+                    f"(attempt {attempt + 2}/{attempts})",
                     file=sys.stderr,
                 )
                 time.sleep(delay)
             continue
         except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
             last_exc, last_detail = exc, ""
-            if attempt < MAX_ATTEMPTS - 1:
+            if attempt < attempts - 1:
                 delay = RETRY_BASE_DELAY * (attempt + 1)
                 print(
                     f"[watch] whisper network error ({type(exc).__name__}: {exc}) — "
-                    f"retrying in {delay:.1f}s (attempt {attempt + 2}/{MAX_ATTEMPTS})",
+                    f"retrying in {delay:.1f}s (attempt {attempt + 2}/{attempts})",
                     file=sys.stderr,
                 )
                 time.sleep(delay)
@@ -299,11 +393,11 @@ def _post_whisper(endpoint: str, api_key: str, model: str, audio_path: Path) -> 
         try:
             return json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"Whisper returned non-JSON response: {exc}: {payload[:200]}")
+            raise SystemExit(f"Whisper returned non-JSON response: {exc}: {payload[:200]}") from exc
 
     raise SystemExit(
-        f"Whisper request failed after {MAX_ATTEMPTS} attempts: {last_exc}{last_detail}"
-    )
+        f"Whisper request failed after {attempts} attempts: {last_exc}{last_detail}"
+    ) from last_exc
 
 
 def _read_error_body(exc: urllib.error.HTTPError) -> str:
@@ -401,11 +495,29 @@ def transcribe_chunks(
 
 
 def _transcribe_file(backend: str, api_key: str, audio_path: Path) -> list[dict]:
-    """Upload one audio file and return its 0-based segments."""
+    """Upload one audio file and return its 0-based segments.
+
+    For "local", `api_key` is actually the configured WATCH_WHISPER_URL base
+    (see load_api_key's docstring) — not a bearer token. It's resolved to the
+    real endpoint via local_endpoint(); the token, model, and timeout come
+    from WATCH_WHISPER_TOKEN/WATCH_WHISPER_MODEL/WATCH_WHISPER_TIMEOUT.
+    `attempts=1` fails fast when the local server is down instead of burning
+    the usual multi-attempt retry ladder, so watch.py can fall back to a
+    cloud backend quickly.
+    """
     if backend == "groq":
         response = _post_whisper(GROQ_ENDPOINT, api_key, GROQ_MODEL, audio_path)
     elif backend == "openai":
         response = _post_whisper(OPENAI_ENDPOINT, api_key, OPENAI_MODEL, audio_path)
+    elif backend == "local":
+        response = _post_whisper(
+            local_endpoint(api_key),
+            _local_token(),
+            _local_model(),
+            audio_path,
+            attempts=1,
+            timeout=_local_timeout(),
+        )
     else:
         raise SystemExit(f"Unknown whisper backend: {backend}")
     return _segments_from_response(response)
@@ -419,7 +531,10 @@ def transcribe_video(
 ) -> tuple[list[dict], str]:
     """Run the full flow: extract audio → upload → parse segments.
 
-    Returns (segments, backend_used). Raises SystemExit on any failure.
+    Returns (segments, backend_used). Raises SystemExit on any failure. The
+    "local" backend (WATCH_WHISPER_URL) has no upload cap, so it always sends
+    the whole audio file in one request — plan_chunks/split_audio only apply
+    to groq/openai's 25 MB limit.
     """
     if backend is None or api_key is None:
         detected_backend, detected_key = load_api_key()
@@ -429,8 +544,9 @@ def transcribe_video(
     if not backend or not api_key:
         setup_py = Path(__file__).resolve().parent / "setup.py"
         raise SystemExit(
-            "No Whisper API key available. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY "
-            "in the environment or in ~/.config/watch/.env. "
+            "No Whisper backend available. Set GROQ_API_KEY (preferred), OPENAI_API_KEY, "
+            "or WATCH_WHISPER_URL (a local OpenAI-compatible server, no key needed) in the "
+            "environment or in ~/.config/watch/.env. "
             f"Run `python3 {setup_py}` to configure."
         )
 
@@ -441,7 +557,7 @@ def transcribe_video(
     def transcribe_one(path: Path) -> list[dict]:
         return _transcribe_file(backend, api_key, path)
 
-    if audio_bytes <= MAX_UPLOAD_BYTES:
+    if backend == "local" or audio_bytes <= MAX_UPLOAD_BYTES:
         print(
             f"[watch] audio: {audio_bytes / 1024:.0f} kB — uploading to {backend} Whisper…",
             file=sys.stderr,
@@ -467,7 +583,7 @@ def transcribe_video(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai]", file=sys.stderr)
+        print("usage: whisper.py <video-path> [<audio-out.mp3>] [--backend groq|openai|local]", file=sys.stderr)
         raise SystemExit(2)
 
     video = sys.argv[1]
