@@ -6,8 +6,10 @@ set -euo pipefail
 
 CONFIG_FILE="$HOME/.config/watch/.env"
 
-# Warn if the secrets file has loose permissions.
-if [[ -f "$CONFIG_FILE" ]]; then
+# Warn if the secrets file has loose permissions. Skipped on Windows shells:
+# NTFS ACLs don't map to POSIX mode bits, so stat always reports 644 there.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) on_windows=1 ;; *) on_windows=0 ;; esac
+if [[ "$on_windows" == 0 && -f "$CONFIG_FILE" ]]; then
   perms=$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || echo "")
   if [[ -n "$perms" && "$perms" != "600" && "$perms" != "400" ]]; then
     echo "/watch: WARNING — $CONFIG_FILE has permissions $perms (should be 600)."

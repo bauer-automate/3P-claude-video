@@ -41,6 +41,11 @@ def _run_whisper(
 
 
 def main() -> int:
+    # Windows consoles default to cp1252, which can't encode the report's
+    # arrows or emoji in titles. Replace instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(
         prog="watch",
         description="Download a video, extract auto-scaled frames, and surface the transcript.",
