@@ -118,7 +118,8 @@ def _check_file_permissions(path: Path) -> None:
     """Warn to stderr (once per path per process) if a secrets file is
     world/group readable."""
     key = str(path)
-    if key in _PERM_WARNED:
+    # NTFS ACLs don't show up in st_mode, so the check is always wrong there.
+    if key in _PERM_WARNED or os.name == "nt":
         return
     try:
         mode = path.stat().st_mode

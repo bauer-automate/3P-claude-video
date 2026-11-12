@@ -8,6 +8,12 @@ All notable changes to `/watch` are documented here.
 - **`local` Whisper backend / `WATCH_WHISPER_URL`** — point `/watch` at a local OpenAI-compatible Whisper server (e.g. `http://127.0.0.1:8321`; a bare host, a `/v1` base, or the full `.../v1/audio/transcriptions` path all work) instead of Groq/OpenAI. No API key needed, and the audio never leaves the machine running the server; optional `WATCH_WHISPER_TOKEN` (sent as a Bearer token), `WATCH_WHISPER_MODEL` (default `whisper-1`), and `WATCH_WHISPER_TIMEOUT` (default 1800s — local transcription of a long file can be slow) round it out. `load_api_key()` checks it first, so it wins over `GROQ_API_KEY`/`OPENAI_API_KEY` automatically when set; force it explicitly with `--whisper local`, or skip it with `--whisper groq`/`--whisper openai`. A local server has no upload-size cap, so `transcribe_video()` sends the whole audio file in one request instead of chunking it the way the 25 MB-capped cloud APIs require.
 - **Local-unreachable fallback** — if a configured local server turns out to be down (and `--whisper local` wasn't forced), `/watch` automatically retries once against a configured cloud key, printing `local whisper unreachable, falling back to <backend>` to stderr instead of failing the whole transcription; with no cloud key either, it falls back to the existing frames-only guidance. `setup.py --json` reports `whisper_backend: "local"` and a new `whisper_url_configured` field; the `.env` template documents the option, and `check-setup.sh`'s status line treats `WATCH_WHISPER_URL` like a key.
 
+## [Unreleased]
+
+### Fixed
+- **Windows: focused mode (`--start` / `--end`) no longer crashes** with `UnicodeEncodeError` on a cp1252 console. `watch.py` now sets stdout and stderr to UTF-8 with `errors="replace"`, which also covers emoji in video titles.
+- **Windows: no false `.env` permission warning.** NTFS ACLs don't show in POSIX mode bits, so the check in `setup.py` and the SessionStart hook is skipped on Windows.
+
 ## [0.4.0] — 2026-08-13
 
 ### Added
